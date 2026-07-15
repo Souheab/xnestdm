@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QMetaObject, QThread, Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -108,10 +109,19 @@ class LoginPage(QWidget):
         self.submitted.emit(username, password)
 
 
+class ViewportHost(QWidget):
+    resized = Signal(int, int)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        size = event.size()
+        self.resized.emit(size.width(), size.height())
+
+
 class DesktopPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.host = QWidget()
+        self.host = ViewportHost()
         self.host.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.host.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.host.setSizePolicy(
@@ -171,6 +181,7 @@ class MainWindow(QMainWindow):
         self.logout_button.setEnabled(False)
 
         self.session_controller = SessionController()
+        self.desktop_page.host.resized.connect(self.session_controller.resize_xephyr)
         self.session_controller.xephyr_ready.connect(self._on_xephyr_ready)
         self.session_controller.session_ready.connect(self._on_session_ready)
         self.session_controller.finished.connect(self._on_session_finished)

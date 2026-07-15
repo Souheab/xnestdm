@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -17,11 +18,102 @@ from pathlib import Path
 from typing import IO
 
 from PySide6.QtCore import QObject, QSocketNotifier, QTimer, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QWidget
 
 from .auth import Account
 
 LOG = logging.getLogger(__name__)
+VIEWPORT_RESIZE_DELAY_MS = 50
+
+
+class _XcbCookie(ctypes.Structure):
+    _fields_ = [("sequence", ctypes.c_uint)]
+
+
+class _X11Viewport:
+    _CONFIGURE_WIDTH = 1 << 2
+    _CONFIGURE_HEIGHT = 1 << 3
+
+    def __init__(self, parent_window_id: int) -> None:
+        application = QGuiApplication.instance()
+        native_interface = (
+            application.nativeInterface() if application is not None else None
+        )
+        connection = (
+            native_interface.connection()
+            if native_interface is not None and hasattr(native_interface, "connection")
+            else 0
+        )
+        if not connection:
+            raise RuntimeError("Qt is not using an X11 connection")
+
+        self.parent_window_id = parent_window_id
+        self.child_window_id = 0
+        self._connection = ctypes.c_void_p(connection)
+        self._xcb = ctypes.CDLL("libxcb.so.1")
+        self._libc = ctypes.CDLL(None)
+        self._configure_functions()
+
+    def resize(self, width: int, height: int) -> bool:
+        if not self.child_window_id:
+            self.child_window_id = self._find_child_window()
+        if not self.child_window_id:
+            return False
+
+        values = (ctypes.c_uint32 * 2)(width, height)
+        self._xcb.xcb_configure_window(
+            self._connection,
+            self.child_window_id,
+            self._CONFIGURE_WIDTH | self._CONFIGURE_HEIGHT,
+            values,
+        )
+        self._xcb.xcb_flush(self._connection)
+        return True
+
+    def _find_child_window(self) -> int:
+        error = ctypes.c_void_p()
+        cookie = self._xcb.xcb_query_tree(self._connection, self.parent_window_id)
+        reply = self._xcb.xcb_query_tree_reply(
+            self._connection, cookie, ctypes.byref(error)
+        )
+        if error.value:
+            self._libc.free(error)
+        if not reply:
+            return 0
+        try:
+            count = self._xcb.xcb_query_tree_children_length(reply)
+            if count < 1:
+                return 0
+            children = self._xcb.xcb_query_tree_children(reply)
+            return int(children[0])
+        finally:
+            self._libc.free(reply)
+
+    def _configure_functions(self) -> None:
+        self._xcb.xcb_query_tree.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self._xcb.xcb_query_tree.restype = _XcbCookie
+        self._xcb.xcb_query_tree_reply.argtypes = [
+            ctypes.c_void_p,
+            _XcbCookie,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self._xcb.xcb_query_tree_reply.restype = ctypes.c_void_p
+        self._xcb.xcb_query_tree_children_length.argtypes = [ctypes.c_void_p]
+        self._xcb.xcb_query_tree_children_length.restype = ctypes.c_int
+        self._xcb.xcb_query_tree_children.argtypes = [ctypes.c_void_p]
+        self._xcb.xcb_query_tree_children.restype = ctypes.POINTER(ctypes.c_uint32)
+        self._xcb.xcb_configure_window.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint16,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._xcb.xcb_configure_window.restype = _XcbCookie
+        self._xcb.xcb_flush.argtypes = [ctypes.c_void_p]
+        self._xcb.xcb_flush.restype = ctypes.c_int
+        self._libc.free.argtypes = [ctypes.c_void_p]
+        self._libc.free.restype = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +218,12 @@ class SessionController(QObject):
         self._bus_fd: int | None = None
         self._bus_notifier: QSocketNotifier | None = None
         self._bus_buffer = b""
+        self._viewport: _X11Viewport | None = None
+        self._pending_viewport_size: tuple[int, int] | None = None
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(VIEWPORT_RESIZE_DELAY_MS)
+        self._resize_timer.timeout.connect(self._apply_viewport_resize)
         self._timer = QTimer(self)
         self._timer.setInterval(200)
         self._timer.timeout.connect(self._poll)
@@ -143,8 +241,14 @@ class SessionController(QObject):
         self._finish_message = ""
         host.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         window_id = int(host.winId())
-        width = max(host.width(), 640)
-        height = max(host.height(), 480)
+        width = max(host.width(), 1)
+        height = max(host.height(), 1)
+        self._pending_viewport_size = (width, height)
+        try:
+            self._viewport = _X11Viewport(window_id)
+        except (OSError, RuntimeError):
+            LOG.exception("Could not initialize dynamic Xephyr resizing")
+            self._viewport = None
 
         read_fd, write_fd = os.pipe()
         os.set_blocking(read_fd, False)
@@ -193,6 +297,25 @@ class SessionController(QObject):
                 os.close(write_fd)
         self.output.drain(self.xephyr.stderr, "Xephyr")
         self._timer.start()
+
+    def resize_xephyr(self, width: int, height: int) -> None:
+        if not self.active:
+            return
+        self._pending_viewport_size = (max(width, 1), max(height, 1))
+        if self.display and not self._resize_timer.isActive():
+            self._resize_timer.start()
+
+    def _apply_viewport_resize(self) -> None:
+        if (
+            self._state
+            not in {"xephyr-ready", "starting-session", "running", "logging-out"}
+            or self._viewport is None
+            or self._pending_viewport_size is None
+        ):
+            return
+        width, height = self._pending_viewport_size
+        if not self._viewport.resize(width, height):
+            LOG.warning("Could not find the embedded Xephyr window to resize")
 
     def start_user_session(
         self, account: Account, pam_environment: dict[str, str]
@@ -329,6 +452,7 @@ class SessionController(QObject):
         self.display = f":{number}"
         self._close_display_notifier()
         self._state = "xephyr-ready"
+        self._resize_timer.start(0)
         self.xephyr_ready.emit(self.display)
 
     def _read_bus_environment(self) -> None:
@@ -439,6 +563,7 @@ class SessionController(QObject):
             if tail:
                 LOG.error("%s\n%s", message, tail)
         self._timer.stop()
+        self._resize_timer.stop()
         self._close_display_notifier()
         self._close_bus_notifier()
         if self._owns_runtime_directory and self.runtime_directory is not None:
@@ -454,6 +579,8 @@ class SessionController(QObject):
         self.logout_process = None
         self.runtime_directory = None
         self._owns_runtime_directory = False
+        self._viewport = None
+        self._pending_viewport_size = None
         self._finish_message = ""
         self._state = "idle"
         if emit:

@@ -139,6 +139,30 @@ class FakeProcess:
         return self.code
 
 
+class FakeViewport:
+    def __init__(self):
+        self.sizes: list[tuple[int, int]] = []
+
+    def resize(self, width: int, height: int) -> bool:
+        self.sizes.append((width, height))
+        return True
+
+
+def test_viewport_resize_uses_latest_size(qapp) -> None:
+    controller = SessionController()
+    viewport = FakeViewport()
+    controller._state = "running"
+    controller.display = ":7"
+    controller._viewport = viewport  # type: ignore[assignment]
+
+    controller.resize_xephyr(800, 600)
+    controller.resize_xephyr(1024, 768)
+    controller._resize_timer.stop()
+    controller._apply_viewport_resize()
+
+    assert viewport.sizes == [(1024, 768)]
+
+
 def test_normal_xfce_exit_finishes_without_error(qapp, monkeypatch) -> None:
     controller = SessionController()
     controller._state = "running"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QResizeEvent
 
 from userdesk.app import DesktopPage, LoginPage, MainWindow
 
@@ -37,6 +38,8 @@ def test_busy_state_and_clear_form(qapp) -> None:
 
 def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
     page = DesktopPage()
+    resized: list[tuple[int, int]] = []
+    page.host.resized.connect(lambda width, height: resized.append((width, height)))
     assert page.host.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
     assert page.host.focusPolicy() == Qt.FocusPolicy.StrongFocus
     margins = page.layout().contentsMargins()
@@ -54,6 +57,12 @@ def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
     page.resize(640, 480)
     page.layout().setGeometry(page.rect())
     assert page.host.geometry() == QRect(12, 12, 616, 456)
+
+    qapp.sendEvent(
+        page.host,
+        QResizeEvent(QSize(616, 456), QSize(876, 676)),
+    )
+    assert resized[-1] == (616, 456)
 
 
 def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:
