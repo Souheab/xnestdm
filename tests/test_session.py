@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import os
 import pwd
+import shutil
 from pathlib import Path
 
 from userdesk.auth import Account
 from userdesk.session import (
+    Commands,
     OutputBuffer,
     SessionController,
     credential_arguments,
+    invoking_account,
     outer_x_environment,
     runtime_directory,
     user_session_environment,
@@ -25,6 +28,39 @@ def current_account() -> Account:
         record.pw_shell,
         tuple(os.getgrouplist(record.pw_name, record.pw_gid)),
     )
+
+
+def test_commands_use_dbus_config_beside_nix_binary(monkeypatch) -> None:
+    monkeypatch.delenv("USERDESK_DBUS_SESSION_CONFIG", raising=False)
+    monkeypatch.setenv(
+        "USERDESK_DBUS_RUN_SESSION", "/nix/store/example-dbus/bin/dbus-run-session"
+    )
+    commands = Commands.from_environment()
+    assert commands.dbus_session_config == (
+        "/nix/store/example-dbus/share/dbus-1/session.conf"
+    )
+
+
+def test_commands_fall_back_to_source_session_entry(monkeypatch) -> None:
+    monkeypatch.delenv("USERDESK_SESSION_ENTRY", raising=False)
+    commands = Commands.from_environment()
+    assert commands.session_entry[0]
+    assert commands.session_entry[1].endswith("userdesk/session_entry.py")
+
+
+def test_commands_derive_nix_xfce_xinitrc(monkeypatch) -> None:
+    monkeypatch.delenv("USERDESK_XFCE_XINITRC", raising=False)
+    original_which = shutil.which
+    monkeypatch.setattr(
+        "userdesk.session.shutil.which",
+        lambda command: (
+            "/nix/store/example-xfce/bin/xfce4-session"
+            if command == "xfce4-session"
+            else original_which(command)
+        ),
+    )
+    commands = Commands.from_environment()
+    assert commands.xinitrc == ("/nix/store/example-xfce/etc/xdg/xfce4/xinitrc")
 
 
 def test_user_environment_is_sanitized(monkeypatch, tmp_path: Path) -> None:
@@ -75,6 +111,13 @@ def test_credential_arguments_avoid_unprivileged_setgroups(monkeypatch) -> None:
         "group": account.gid,
         "extra_groups": account.groups,
     }
+
+
+def test_unprivileged_invoking_account_ignores_spoofed_sudo_uid(monkeypatch) -> None:
+    account = current_account()
+    monkeypatch.setenv("SUDO_UID", "0")
+    monkeypatch.setattr("userdesk.session.os.geteuid", lambda: account.uid)
+    assert invoking_account().uid == account.uid
 
 
 def test_runtime_directory_uses_owned_run_directory_or_private_temp(

@@ -7,6 +7,7 @@ import pwd
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,19 +28,39 @@ LOG = logging.getLogger(__name__)
 class Commands:
     xephyr: str
     dbus_run_session: str
-    session_entry: str
+    dbus_session_config: str
+    session_entry: tuple[str, ...]
     shell: str
     xinitrc: str
     logout: str
 
     @classmethod
     def from_environment(cls) -> "Commands":
+        dbus_run_session = _command("USERDESK_DBUS_RUN_SESSION", "dbus-run-session")
+        default_dbus_config = (
+            Path(dbus_run_session).parent.parent / "share/dbus-1/session.conf"
+        )
+        configured_session_entry = os.environ.get("USERDESK_SESSION_ENTRY")
+        session_entry = (
+            (configured_session_entry,)
+            if configured_session_entry
+            else (sys.executable, str(Path(__file__).with_name("session_entry.py")))
+        )
+        xfce_session = shutil.which("xfce4-session")
+        default_xinitrc = (
+            Path(xfce_session).parent.parent / "etc/xdg/xfce4/xinitrc"
+            if xfce_session
+            else Path("/etc/xdg/xfce4/xinitrc")
+        )
         return cls(
             xephyr=_command("USERDESK_XEPHYR", "Xephyr"),
-            dbus_run_session=_command("USERDESK_DBUS_RUN_SESSION", "dbus-run-session"),
-            session_entry=_command("USERDESK_SESSION_ENTRY", "userdesk-session-entry"),
+            dbus_run_session=dbus_run_session,
+            dbus_session_config=os.environ.get(
+                "USERDESK_DBUS_SESSION_CONFIG", str(default_dbus_config)
+            ),
+            session_entry=session_entry,
             shell=_command("USERDESK_SHELL", "sh"),
-            xinitrc=os.environ.get("USERDESK_XFCE_XINITRC", "/etc/xdg/xfce4/xinitrc"),
+            xinitrc=os.environ.get("USERDESK_XFCE_XINITRC", str(default_xinitrc)),
             logout=_command("USERDESK_XFCE_LOGOUT", "xfce4-session-logout"),
         )
 
@@ -200,8 +221,10 @@ class SessionController(QObject):
             self._bus_notifier.activated.connect(self._read_bus_environment)
             argv = [
                 self.commands.dbus_run_session,
+                "--config-file",
+                self.commands.dbus_session_config,
                 "--",
-                self.commands.session_entry,
+                *self.commands.session_entry,
                 "--notify-fd",
                 str(write_fd),
                 "--shell",
@@ -462,7 +485,7 @@ class SessionController(QObject):
 
 
 def invoking_account() -> Account:
-    uid_text = os.environ.get("SUDO_UID")
+    uid_text = os.environ.get("SUDO_UID") if os.geteuid() == 0 else None
     uid = int(uid_text) if uid_text and uid_text.isdigit() else os.getuid()
     record = pwd.getpwuid(uid)
     return Account(

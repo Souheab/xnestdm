@@ -33,30 +33,15 @@ def main() -> int:
         )
         return 2
 
-    if os.geteuid() != 0:
-        message = (
-            "Userdesk must run as root to authenticate and switch users.\n\n"
-            "Run:\n"
-            "sudo --preserve-env=DISPLAY,XAUTHORITY nix run ."
-        )
-        print(message, file=sys.stderr)
-        try:
-            from PySide6.QtWidgets import QApplication, QMessageBox
-
-            application = QApplication(sys.argv[:1])
-            QMessageBox.critical(None, "Userdesk", message)
-            application.quit()
-        except Exception:
-            logging.getLogger(__name__).exception("Could not show startup error")
-        return 2
-
     from PySide6.QtWidgets import QApplication
 
     from .app import MainWindow
     from .auth import select_pam_service
 
     application = QApplication(sys.argv[:1])
-    window = MainWindow(select_pam_service(args.pam_service))
+    window = MainWindow(
+        select_pam_service(args.pam_service), allow_other_users=os.geteuid() == 0
+    )
     window.show()
     return application.exec()
 

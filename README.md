@@ -1,15 +1,16 @@
 # Userdesk
 
 Userdesk is a PySide6 application that embeds a Xephyr X server in a normal Qt
-window and starts an XFCE session inside it as a PAM-authenticated local user.
+window and starts an XFCE session inside it as the current user or as a
+PAM-authenticated local user.
 The Qt login page and session toolbar use the platform's default Qt style.
 
 ## Requirements
 
 - Linux with an X11 desktop, or a Wayland desktop with working XWayland
 - Nix with flakes enabled
-- A usable host PAM service and local/NSS-visible user accounts
-- `sudo` access, because authentication and switching UID/GID require root
+- A usable host PAM service and local/NSS-visible accounts when switching users
+- Optional `sudo` access for authenticating and switching to another user
 
 This is not a sandbox. The nested session uses the selected user's normal home,
 configuration, devices, network, and host permissions. Xephyr is started with
@@ -23,11 +24,21 @@ Build without privileges:
 nix build
 ```
 
-Run from the repository while preserving the outer X connection:
+Run without privileges to start XFCE as your current user:
+
+```console
+nix run .
+```
+
+In this mode, the username and password controls are disabled. To enable login
+as another user, run while preserving the outer X connection:
 
 ```console
 sudo --preserve-env=DISPLAY,XAUTHORITY nix run .
 ```
+
+The current-user button still refers to the original `sudo` invoker in this
+mode, rather than to root.
 
 If `XAUTHORITY` is normally unset but your display cookie is stored in
 `~/.Xauthority`, provide it explicitly before `sudo`:
@@ -39,9 +50,9 @@ XAUTHORITY="$HOME/.Xauthority" sudo --preserve-env=DISPLAY,XAUTHORITY nix run .
 Userdesk forces Qt's `xcb` backend. On a Wayland desktop, `DISPLAY` must point to
 XWayland; native Wayland embedding is not supported.
 
-By default, the application uses the `userdesk` PAM service when
-`/etc/pam.d/userdesk` exists and otherwise falls back to `login`. Override this
-for a host-specific policy with:
+When login as another user is enabled, the application uses the `userdesk` PAM
+service when `/etc/pam.d/userdesk` exists and otherwise falls back to `login`.
+Override this for a host-specific policy with:
 
 ```console
 sudo --preserve-env=DISPLAY,XAUTHORITY nix run . -- --pam-service SERVICE
@@ -70,7 +81,7 @@ service using the machine's normal PAM account and session rules:
 ```
 
 The module does not install a setuid GUI. Start the installed `userdesk` command
-through `sudo` in the same way as the flake app.
+normally for a current-user session, or through `sudo` to enable switching users.
 
 ## Development and checks
 

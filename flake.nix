@@ -70,6 +70,7 @@
             "--set QT_QPA_PLATFORM xcb"
             "--set USERDESK_XEPHYR ${pkgs.xorg-server}/bin/Xephyr"
             "--set USERDESK_DBUS_RUN_SESSION ${pkgs.dbus}/bin/dbus-run-session"
+            "--set USERDESK_DBUS_SESSION_CONFIG ${pkgs.dbus}/share/dbus-1/session.conf"
             "--set USERDESK_SESSION_ENTRY $out/bin/userdesk-session-entry"
             "--set USERDESK_SHELL ${pkgs.bash}/bin/sh"
             "--set USERDESK_XFCE_XINITRC ${pkgs.xfce4-session.xinitrc}"
@@ -119,6 +120,7 @@
                 pythonPackages.pytest
                 pythonPackages.pyside6
               ]))
+              pkgs.dbus
               pkgs.nixfmt
               pkgs.ruff
               pkgs.xorg-server
