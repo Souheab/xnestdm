@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtGui import QAction, QIcon, QResizeEvent
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QComboBox,
     QSizePolicy,
     QStackedWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +27,7 @@ from .auth import (
     AuthenticationOutcome,
     SessionStartOutcome,
 )
+from .clipboard import ClipboardBridge
 from .helper_client import HelperClient
 from .session import SessionController, invoking_account
 from .xsessions import XSession, discover_xsessions, preferred_xsession_index
@@ -35,6 +38,7 @@ OTHER_USERS_DISABLED = (
     "xnestdm with sudo to enable it."
 )
 VIEWPORT_PADDING = 12
+CLIPBOARD_SHARING_SETTING = "clipboard/sharingEnabled"
 
 
 class LoginPage(QWidget):
@@ -166,9 +170,18 @@ class DesktopPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, helper_client: HelperClient | None = None):
+    def __init__(
+        self,
+        helper_client: HelperClient | None = None,
+        *,
+        settings: QSettings | None = None,
+        clipboard_bridge: ClipboardBridge | None = None,
+    ):
         super().__init__()
         self.helper_client = helper_client
+        self.settings = (
+            settings if settings is not None else QSettings("xnestdm", "xnestdm")
+        )
         self.allow_other_users = helper_client is not None
         self.current_account = invoking_account()
         self.account: Account | None = None
@@ -179,6 +192,7 @@ class MainWindow(QMainWindow):
         self.remote_session_active = False
         self.pending_message = ""
         self.closing = False
+        self.nested_display = ""
 
         self.setWindowTitle("xnestdm")
         self.resize(1200, 800)
@@ -199,15 +213,38 @@ class MainWindow(QMainWindow):
         self.toolbar = QToolBar("Session", self)
         self.toolbar.setMovable(False)
         self.user_label = QLabel()
+        self.settings_button = QToolButton()
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setAccessibleName("Settings")
+        settings_icon = QIcon.fromTheme("preferences-system")
+        if settings_icon.isNull():
+            self.settings_button.setText("⚙")
+        else:
+            self.settings_button.setIcon(settings_icon)
+        self.settings_menu = QMenu(self.settings_button)
+        self.clipboard_action = QAction("Share clipboard with guest", self)
+        self.clipboard_action.setCheckable(True)
+        self.clipboard_action.setChecked(
+            self.settings.value(CLIPBOARD_SHARING_SETTING, False, type=bool)
+        )
+        self.settings_menu.addAction(self.clipboard_action)
+        self.settings_button.setMenu(self.settings_menu)
+        self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.logout_button = QPushButton("End Session")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.toolbar.addWidget(self.user_label)
         self.toolbar.addWidget(spacer)
+        self.toolbar.addWidget(self.settings_button)
         self.toolbar.addWidget(self.logout_button)
         self.addToolBar(self.toolbar)
         self.toolbar.hide()
         self.logout_button.setEnabled(False)
+
+        self.clipboard_bridge = (
+            clipboard_bridge if clipboard_bridge is not None else ClipboardBridge(self)
+        )
+        self.clipboard_bridge.failed.connect(self._on_clipboard_bridge_failed)
 
         self.session_controller = SessionController()
         self.desktop_page.host.resized.connect(self.session_controller.resize_xephyr)
@@ -229,6 +266,7 @@ class MainWindow(QMainWindow):
 
         self.login_page.submitted.connect(self._authenticate)
         self.login_page.current_user_requested.connect(self._use_current_user)
+        self.clipboard_action.toggled.connect(self._set_clipboard_sharing)
         self.logout_button.clicked.connect(self._confirm_end_session)
 
     def _authenticate(
@@ -284,6 +322,8 @@ class MainWindow(QMainWindow):
         selected_session: XSession,
         pam_session_required: bool,
     ) -> None:
+        self.clipboard_bridge.stop()
+        self.nested_display = ""
         self.account = account
         self.selected_session = selected_session
         self.pending_session = None
@@ -309,6 +349,9 @@ class MainWindow(QMainWindow):
     def _on_xephyr_ready(self, display: str) -> None:
         if self.closing or self.account is None or self.selected_session is None:
             return
+        self.nested_display = display
+        if self.clipboard_action.isChecked():
+            self._start_clipboard_bridge()
         if not self.pam_session_required:
             self.session_controller.start_user_session(
                 self.account, {}, self.selected_session
@@ -355,6 +398,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.logout_button.setEnabled(False)
+        self.clipboard_bridge.stop()
+        self.nested_display = ""
         if self.pam_session_required:
             self._request_helper_stop()
         else:
@@ -363,6 +408,8 @@ class MainWindow(QMainWindow):
     def _on_session_finished(self, message: str) -> None:
         if self.closing:
             return
+        self.clipboard_bridge.stop()
+        self.nested_display = ""
         self.pending_message = message
         if self.pam_session_required and self.helper_transaction_pending:
             self._request_helper_stop()
@@ -406,6 +453,8 @@ class MainWindow(QMainWindow):
     def _reset_login(self, message: str) -> None:
         if not message and not self.allow_other_users:
             message = OTHER_USERS_DISABLED
+        self.clipboard_bridge.stop()
+        self.nested_display = ""
         self.account = None
         self.selected_session = None
         self.pending_session = None
@@ -419,8 +468,35 @@ class MainWindow(QMainWindow):
         self.login_page.clear_form()
         self.login_page.set_busy(False, message)
 
+    def _set_clipboard_sharing(self, enabled: bool) -> None:
+        self.settings.setValue(CLIPBOARD_SHARING_SETTING, enabled)
+        self.settings.sync()
+        if not enabled:
+            self.clipboard_bridge.stop()
+        elif self.nested_display:
+            self._start_clipboard_bridge()
+
+    def _start_clipboard_bridge(self) -> None:
+        try:
+            self.clipboard_bridge.start(self.nested_display)
+        except Exception as exc:
+            LOG.exception("Could not start clipboard sharing")
+            self._on_clipboard_bridge_failed(str(exc))
+
+    def _on_clipboard_bridge_failed(self, message: str) -> None:
+        if self.closing:
+            return
+        self.clipboard_bridge.stop()
+        self.clipboard_action.setChecked(False)
+        QMessageBox.warning(
+            self,
+            "Clipboard Sharing Unavailable",
+            message or "Clipboard sharing stopped unexpectedly.",
+        )
+
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.closing = True
+        self.clipboard_bridge.stop()
         if self.helper_client is not None:
             self.helper_client.shutdown()
         self.session_controller.shutdown_blocking()

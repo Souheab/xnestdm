@@ -25,6 +25,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--clipboard-helper"]:
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        from .clipboard import _guest_main
+
+        return _guest_main()
+
     args = _parser().parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

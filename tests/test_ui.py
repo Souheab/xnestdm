@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QResizeEvent
+import pytest
 
-from xnestdm.app import DesktopPage, LoginPage, MainWindow
+from PySide6.QtCore import QObject, QRect, QSettings, QSize, Qt, Signal
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtWidgets import QMessageBox
+
+from xnestdm.app import (
+    CLIPBOARD_SHARING_SETTING,
+    DesktopPage,
+    LoginPage,
+    MainWindow,
+)
 from xnestdm.auth import Account, AuthenticationOutcome, SessionStartOutcome
 from xnestdm.xsessions import XSession
 
@@ -43,6 +51,26 @@ class FakeHelper(QObject):
 
     def shutdown(self) -> None:
         self.shutdown_requests += 1
+
+
+class FakeClipboardBridge(QObject):
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.starts: list[str] = []
+        self.stops = 0
+
+    def start(self, display: str) -> None:
+        self.starts.append(display)
+
+    def stop(self) -> None:
+        self.stops += 1
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> QSettings:
+    return QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
 
 
 def test_login_form_uses_password_echo_and_emits_credentials(qapp) -> None:
@@ -108,9 +136,9 @@ def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
     assert resized[-1] == (616, 456)
 
 
-def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:
+def test_main_window_clears_password_when_auth_is_dispatched(qapp, settings) -> None:
     helper = FakeHelper()
-    window = MainWindow(helper)  # type: ignore[arg-type]
+    window = MainWindow(helper, settings=settings)  # type: ignore[arg-type]
     window.login_page.password.setText("secret")
 
     window._authenticate("alice", "secret", SESSION)
@@ -137,8 +165,8 @@ def test_unprivileged_login_page_only_allows_current_user(qapp) -> None:
     assert current_user_requests == [SESSION]
 
 
-def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
-    window = MainWindow()
+def test_current_user_path_skips_pam(qapp, monkeypatch, settings) -> None:
+    window = MainWindow(settings=settings)
     starts = []
     monkeypatch.setattr(
         window.session_controller,
@@ -167,9 +195,11 @@ def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
     window.close()
 
 
-def test_alternate_user_routes_session_through_helper(qapp, monkeypatch) -> None:
+def test_alternate_user_routes_session_through_helper(
+    qapp, monkeypatch, settings
+) -> None:
     helper = FakeHelper()
-    window = MainWindow(helper)  # type: ignore[arg-type]
+    window = MainWindow(helper, settings=settings)  # type: ignore[arg-type]
     account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
     starts = []
     monkeypatch.setattr(
@@ -192,4 +222,86 @@ def test_alternate_user_routes_session_through_helper(qapp, monkeypatch) -> None
     )
     helper.session_start_finished.emit(SessionStartOutcome(True))
     assert window.remote_session_active
+    window.close()
+
+
+def test_settings_cog_controls_clipboard_bridge_lifecycle(
+    qapp, monkeypatch, settings
+) -> None:
+    bridge = FakeClipboardBridge()
+    window = MainWindow(
+        settings=settings,
+        clipboard_bridge=bridge,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(window.session_controller, "start_xephyr", lambda *_: None)
+    monkeypatch.setattr(
+        window.session_controller, "start_user_session", lambda *_: None
+    )
+
+    assert window.settings_button.accessibleName() == "Settings"
+    assert window.settings_button.toolTip() == "Settings"
+    assert window.clipboard_action.text() == "Share clipboard with guest"
+    assert window.clipboard_action.isCheckable()
+    assert window.settings_menu.actions() == [window.clipboard_action]
+    assert not window.clipboard_action.isChecked()
+
+    window.clipboard_action.setChecked(True)
+    assert settings.value(CLIPBOARD_SHARING_SETTING, type=bool) is True
+    assert bridge.starts == []
+
+    window._use_current_user(SESSION)
+    assert not window.toolbar.isHidden()
+    window._on_xephyr_ready(":17")
+    assert bridge.starts == [":17"]
+
+    window.clipboard_action.setChecked(False)
+    assert settings.value(CLIPBOARD_SHARING_SETTING, type=bool) is False
+    assert bridge.stops >= 1
+
+    window.clipboard_action.setChecked(True)
+    assert bridge.starts == [":17", ":17"]
+    window.close()
+
+
+def test_clipboard_choice_is_remembered(qapp, settings) -> None:
+    first_bridge = FakeClipboardBridge()
+    first = MainWindow(
+        settings=settings,
+        clipboard_bridge=first_bridge,  # type: ignore[arg-type]
+    )
+    first.clipboard_action.setChecked(True)
+    first.close()
+
+    restored_settings = QSettings(settings.fileName(), QSettings.Format.IniFormat)
+    second = MainWindow(
+        settings=restored_settings,
+        clipboard_bridge=FakeClipboardBridge(),  # type: ignore[arg-type]
+    )
+    assert second.clipboard_action.isChecked()
+    second.close()
+
+
+def test_clipboard_failure_disables_only_sharing(qapp, monkeypatch, settings) -> None:
+    bridge = FakeClipboardBridge()
+    window = MainWindow(
+        settings=settings,
+        clipboard_bridge=bridge,  # type: ignore[arg-type]
+    )
+    stopped_sessions: list[str] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(window.session_controller, "stop", stopped_sessions.append)
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+    window.clipboard_action.setChecked(True)
+    window.nested_display = ":18"
+
+    bridge.failed.emit("The clipboard helper crashed")
+
+    assert not window.clipboard_action.isChecked()
+    assert settings.value(CLIPBOARD_SHARING_SETTING, type=bool) is False
+    assert warnings == ["The clipboard helper crashed"]
+    assert stopped_sessions == []
     window.close()

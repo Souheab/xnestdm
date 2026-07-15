@@ -83,6 +83,19 @@ provides the dedicated `xnestdm` policy and full PAM open/close session hooks.
 Add `--verbose` after `--` to include Xephyr and nested-session diagnostics on
 standard error.
 
+### Clipboard sharing
+
+During a nested session, open the settings cog in the top toolbar and enable
+**Share clipboard with guest** to copy and paste plain text between the host
+and guest. The option is off on first use and remembers later changes. Enabling
+it sends the host's current clipboard text to the guest; disabling it stops
+future synchronization without clearing either clipboard.
+
+Clipboard sharing is bidirectional and deliberately opt-in because guest
+applications can read host clipboard text while it is enabled. Images, files,
+rich text, custom clipboard formats, and the X11 primary selection are not
+shared.
+
 ### Session discovery overrides
 
 `XNESTDM_XSESSION_DIRS` accepts a colon-separated list of additional host

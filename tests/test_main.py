@@ -1,7 +1,19 @@
 from __future__ import annotations
 
-from xnestdm.__main__ import _drop_privileges, _prepare_helper
+import sys
+
+from xnestdm.__main__ import _drop_privileges, _prepare_helper, main
 from xnestdm.auth import Account
+
+
+def test_internal_clipboard_helper_skips_normal_application_startup(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["xnestdm", "--clipboard-helper"])
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setattr("xnestdm.clipboard._guest_main", lambda: 23)
+
+    assert main() == 23
 
 
 def test_setuid_launcher_rejects_pam_service_override(monkeypatch) -> None:
