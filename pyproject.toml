@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "userdesk"
+version = "0.1.0"
+description = "A PySide6 host for an embedded Xephyr XFCE session"
+requires-python = ">=3.11"
+dependencies = [
+  "pamela>=1.2",
+  "PySide6>=6.7",
+]
+
+[project.scripts]
+userdesk = "userdesk.__main__:main"
+userdesk-session-entry = "userdesk.session_entry:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
