@@ -10,6 +10,7 @@ import pamela
 from PySide6.QtCore import QObject, Signal, Slot
 
 LOG = logging.getLogger(__name__)
+AUTHENTICATION_ONLY_SERVICES = {"login"}
 
 # Linux-PAM return values for conditions worth distinguishing in the UI.
 PAM_NEW_AUTHTOK_REQD = 12
@@ -64,9 +65,11 @@ class SessionOpenOutcome:
 class PamTransaction:
     """Own one PAM handle from authentication through session close."""
 
-    def __init__(self, handle: Any, account: Account):
+    def __init__(self, handle: Any, account: Account, service: str):
         self.handle = handle
         self.account = account
+        self.service = service
+        self.manage_session = service not in AUTHENTICATION_ONLY_SERVICES
         self.session_open = False
         self.closed = False
 
@@ -87,7 +90,7 @@ class PamTransaction:
         except Exception:
             pamela.pam_end(handle)
             raise
-        return cls(handle, account)
+        return cls(handle, account, service)
 
     def open(self, display: str, invoking_user: str) -> dict[str, str]:
         if self.closed:
@@ -106,8 +109,14 @@ class PamTransaction:
         }
         for key, value in values.items():
             self.handle.put_env(key, value)
-        self.handle.open_session()
-        self.session_open = True
+        if self.manage_session:
+            self.handle.open_session()
+            self.session_open = True
+        else:
+            LOG.info(
+                "Skipping PAM open_session for authentication-only service %s",
+                self.service,
+            )
         return dict(self.handle.get_envlist())
 
     def close(self) -> None:

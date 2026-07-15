@@ -54,7 +54,7 @@ def test_authenticate_keeps_handle_and_checks_account(monkeypatch) -> None:
 def test_open_and_close_use_same_pam_handle(monkeypatch) -> None:
     handle = FakeHandle()
     account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
-    transaction = PamTransaction(handle, account)
+    transaction = PamTransaction(handle, account, "userdesk")
     calls = SimpleNamespace(setcred=0, ended=0)
     monkeypatch.setattr(
         "userdesk.auth.pamela.PAM_SETCRED",
@@ -74,6 +74,22 @@ def test_open_and_close_use_same_pam_handle(monkeypatch) -> None:
     assert calls.setcred == 1
     assert calls.ended == 1
     assert transaction.closed
+
+
+def test_login_service_skips_session_hooks(monkeypatch) -> None:
+    handle = FakeHandle()
+    account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
+    transaction = PamTransaction(handle, account, "login")
+    monkeypatch.setattr("userdesk.auth.pamela.PAM_SETCRED", lambda *args: 0)
+    monkeypatch.setattr("userdesk.auth.pamela.pam_end", lambda handle: None)
+
+    environment = transaction.open(":101", "launcher")
+    transaction.close()
+
+    assert environment["DISPLAY"] == ":101"
+    assert handle.opened is False
+    assert handle.closed is False
+    assert transaction.manage_session is False
 
 
 def test_account_lookup_failure_ends_pam(monkeypatch) -> None:

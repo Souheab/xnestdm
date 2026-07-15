@@ -58,6 +58,12 @@ Override this for a host-specific policy with:
 sudo --preserve-env=DISPLAY,XAUTHORITY nix run . -- --pam-service SERVICE
 ```
 
+The standalone `login` fallback performs PAM authentication, account checks,
+and credential setup, but intentionally skips that service's session hooks.
+Traditional `login` policies commonly require `pam_loginuid`, which cannot
+replace the audit login ID inherited through `sudo`. Enabling the NixOS module
+provides the dedicated `userdesk` policy and full PAM open/close session hooks.
+
 Add `--verbose` after `--` to include Xephyr/XFCE diagnostics on standard error.
 
 ## NixOS module
