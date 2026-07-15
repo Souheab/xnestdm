@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import pwd
-import shutil
 from pathlib import Path
 
 from userdesk.auth import Account
@@ -15,6 +14,16 @@ from userdesk.session import (
     outer_x_environment,
     runtime_directory,
     user_session_environment,
+)
+from userdesk.xsessions import XSession
+
+
+SESSION = XSession(
+    "test-session",
+    "Test Session",
+    ("/host/bin/start-session", "--nested"),
+    ("Test", "Example"),
+    Path("/host/share/xsessions/test-session.desktop"),
 )
 
 
@@ -30,37 +39,12 @@ def current_account() -> Account:
     )
 
 
-def test_commands_use_dbus_config_beside_nix_binary(monkeypatch) -> None:
-    monkeypatch.delenv("USERDESK_DBUS_SESSION_CONFIG", raising=False)
-    monkeypatch.setenv(
-        "USERDESK_DBUS_RUN_SESSION", "/nix/store/example-dbus/bin/dbus-run-session"
-    )
+def test_commands_read_optional_host_session_wrapper(monkeypatch) -> None:
+    monkeypatch.setenv("USERDESK_XEPHYR", "/app/bin/Xephyr")
+    monkeypatch.setenv("USERDESK_XSESSION_WRAPPER", "/host/Xsession --nested")
     commands = Commands.from_environment()
-    assert commands.dbus_session_config == (
-        "/nix/store/example-dbus/share/dbus-1/session.conf"
-    )
-
-
-def test_commands_fall_back_to_source_session_entry(monkeypatch) -> None:
-    monkeypatch.delenv("USERDESK_SESSION_ENTRY", raising=False)
-    commands = Commands.from_environment()
-    assert commands.session_entry[0]
-    assert commands.session_entry[1].endswith("userdesk/session_entry.py")
-
-
-def test_commands_derive_nix_xfce_xinitrc(monkeypatch) -> None:
-    monkeypatch.delenv("USERDESK_XFCE_XINITRC", raising=False)
-    original_which = shutil.which
-    monkeypatch.setattr(
-        "userdesk.session.shutil.which",
-        lambda command: (
-            "/nix/store/example-xfce/bin/xfce4-session"
-            if command == "xfce4-session"
-            else original_which(command)
-        ),
-    )
-    commands = Commands.from_environment()
-    assert commands.xinitrc == ("/nix/store/example-xfce/etc/xdg/xfce4/xinitrc")
+    assert commands.xephyr == "/app/bin/Xephyr"
+    assert commands.session_wrapper == ("/host/Xsession", "--nested")
 
 
 def test_user_environment_is_sanitized(monkeypatch, tmp_path: Path) -> None:
@@ -79,12 +63,16 @@ def test_user_environment_is_sanitized(monkeypatch, tmp_path: Path) -> None:
             "XAUTHORITY": "/root/cookie",
         },
         tmp_path,
+        SESSION,
     )
 
     assert environment["DISPLAY"] == ":112"
     assert environment["HOME"] == account.home
     assert environment["PAM_THING"] == "yes"
-    assert environment["PATH"] == "/packaged/bin"
+    assert environment["PATH"] == "/pam/bin"
+    assert environment["XDG_DATA_DIRS"] == "/packaged/share"
+    assert environment["XDG_SESSION_DESKTOP"] == "test-session"
+    assert environment["XDG_CURRENT_DESKTOP"] == "Test:Example"
     assert "DBUS_SESSION_BUS_ADDRESS" not in environment
     assert "XAUTHORITY" not in environment
     assert "SUDO_UID" not in environment
@@ -134,9 +122,74 @@ class FakeProcess:
     def __init__(self, code=None):
         self.code = code
         self.pid = 999999
+        self.stdout = None
 
     def poll(self):
         return self.code
+
+
+def test_selected_session_is_started_through_host_wrapper(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    account = current_account()
+    controller = SessionController(Commands("/app/bin/Xephyr", ("/host/Xsession",)))
+    controller._state = "xephyr-ready"
+    controller.display = ":8"
+    launches: list[tuple[list[str], dict[str, object]]] = []
+
+    def launch(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "userdesk.session.runtime_directory", lambda account: (tmp_path, False)
+    )
+    monkeypatch.setattr("userdesk.session.subprocess.Popen", launch)
+
+    controller.start_user_session(account, {}, SESSION)
+
+    assert launches[0][0] == [
+        "/host/Xsession",
+        "/host/bin/start-session",
+        "--nested",
+    ]
+    assert launches[0][1]["cwd"] == account.home
+    assert launches[0][1]["env"]["DISPLAY"] == ":8"
+    assert controller._state == "running"
+
+
+def test_end_session_terminates_session_before_xephyr(qapp, monkeypatch) -> None:
+    controller = SessionController()
+    controller._state = "running"
+    controller.account = current_account()
+    controller.session = FakeProcess()  # type: ignore[assignment]
+    controller.xephyr = FakeProcess()  # type: ignore[assignment]
+    terminated = []
+    monkeypatch.setattr(controller, "_terminate_process", terminated.append)
+
+    controller.request_end_session()
+
+    assert controller._state == "ending-session"
+    assert terminated == [controller.session]
+
+
+def test_end_session_timeout_forces_session_and_stops_xephyr(qapp, monkeypatch) -> None:
+    controller = SessionController()
+    controller._state = "ending-session"
+    controller._deadline = 1.0
+    controller.session = FakeProcess()  # type: ignore[assignment]
+    controller.xephyr = FakeProcess()  # type: ignore[assignment]
+    killed = []
+    terminated = []
+    monkeypatch.setattr("userdesk.session.time.monotonic", lambda: 2.0)
+    monkeypatch.setattr(controller, "_kill_process", killed.append)
+    monkeypatch.setattr(controller, "_terminate_process", terminated.append)
+
+    controller._poll()
+
+    assert killed == [controller.session]
+    assert terminated == [controller.session, controller.xephyr]
+    assert controller._state == "stopping"
 
 
 class FakeViewport:
@@ -163,7 +216,7 @@ def test_viewport_resize_uses_latest_size(qapp) -> None:
     assert viewport.sizes == [(1024, 768)]
 
 
-def test_normal_xfce_exit_finishes_without_error(qapp, monkeypatch) -> None:
+def test_normal_session_exit_finishes_without_error(qapp, monkeypatch) -> None:
     controller = SessionController()
     controller._state = "running"
     controller.xephyr = FakeProcess()  # type: ignore[assignment]

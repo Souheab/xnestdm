@@ -92,7 +92,13 @@ class PamTransaction:
             raise
         return cls(handle, account, service)
 
-    def open(self, display: str, invoking_user: str) -> dict[str, str]:
+    def open(
+        self,
+        display: str,
+        invoking_user: str,
+        session_id: str,
+        current_desktop: str,
+    ) -> dict[str, str]:
         if self.closed:
             raise RuntimeError("PAM transaction is already closed")
         self.handle.set_item(pamela.PAM_TTY, f"userdesk/{display}")
@@ -103,9 +109,9 @@ class PamTransaction:
             "DISPLAY": display,
             "XDG_SESSION_TYPE": "x11",
             "XDG_SESSION_CLASS": "user",
-            "XDG_SESSION_DESKTOP": "xfce",
-            "XDG_CURRENT_DESKTOP": "XFCE",
-            "DESKTOP_SESSION": "xfce",
+            "XDG_SESSION_DESKTOP": session_id,
+            "XDG_CURRENT_DESKTOP": current_desktop,
+            "DESKTOP_SESSION": session_id,
         }
         for key, value in values.items():
             self.handle.put_env(key, value)
@@ -173,15 +179,23 @@ class PamWorker(QObject):
             outcome = AuthenticationOutcome(True, account=self.transaction.account)
         self.authentication_finished.emit(outcome)
 
-    @Slot(str, str)
-    def open_session(self, display: str, invoking_user: str) -> None:
+    @Slot(str, str, str, str)
+    def open_session(
+        self,
+        display: str,
+        invoking_user: str,
+        session_id: str,
+        current_desktop: str,
+    ) -> None:
         if self.transaction is None:
             self.session_open_finished.emit(
                 SessionOpenOutcome(False, message="No authenticated PAM transaction")
             )
             return
         try:
-            environment = self.transaction.open(display, invoking_user)
+            environment = self.transaction.open(
+                display, invoking_user, session_id, current_desktop
+            )
         except Exception:
             LOG.exception("Could not open PAM session")
             self._close(suppress=True)

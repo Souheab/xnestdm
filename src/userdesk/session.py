@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import logging
 import os
 import pwd
 import shutil
+import shlex
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -22,6 +21,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QWidget
 
 from .auth import Account
+from .xsessions import XSession, resolve_session_command
 
 LOG = logging.getLogger(__name__)
 VIEWPORT_RESIZE_DELAY_MS = 50
@@ -119,41 +119,18 @@ class _X11Viewport:
 @dataclass(frozen=True)
 class Commands:
     xephyr: str
-    dbus_run_session: str
-    dbus_session_config: str
-    session_entry: tuple[str, ...]
-    shell: str
-    xinitrc: str
-    logout: str
+    session_wrapper: tuple[str, ...]
 
     @classmethod
     def from_environment(cls) -> "Commands":
-        dbus_run_session = _command("USERDESK_DBUS_RUN_SESSION", "dbus-run-session")
-        default_dbus_config = (
-            Path(dbus_run_session).parent.parent / "share/dbus-1/session.conf"
-        )
-        configured_session_entry = os.environ.get("USERDESK_SESSION_ENTRY")
-        session_entry = (
-            (configured_session_entry,)
-            if configured_session_entry
-            else (sys.executable, str(Path(__file__).with_name("session_entry.py")))
-        )
-        xfce_session = shutil.which("xfce4-session")
-        default_xinitrc = (
-            Path(xfce_session).parent.parent / "etc/xdg/xfce4/xinitrc"
-            if xfce_session
-            else Path("/etc/xdg/xfce4/xinitrc")
-        )
+        configured_wrapper = os.environ.get("USERDESK_XSESSION_WRAPPER", "")
+        try:
+            session_wrapper = tuple(shlex.split(configured_wrapper, posix=True))
+        except ValueError:
+            session_wrapper = ()
         return cls(
             xephyr=_command("USERDESK_XEPHYR", "Xephyr"),
-            dbus_run_session=dbus_run_session,
-            dbus_session_config=os.environ.get(
-                "USERDESK_DBUS_SESSION_CONFIG", str(default_dbus_config)
-            ),
-            session_entry=session_entry,
-            shell=_command("USERDESK_SHELL", "sh"),
-            xinitrc=os.environ.get("USERDESK_XFCE_XINITRC", str(default_xinitrc)),
-            logout=_command("USERDESK_XFCE_LOGOUT", "xfce4-session-logout"),
+            session_wrapper=session_wrapper,
         )
 
 
@@ -206,7 +183,6 @@ class SessionController(QObject):
         self.session_environment: dict[str, str] = {}
         self.xephyr: subprocess.Popen[bytes] | None = None
         self.session: subprocess.Popen[bytes] | None = None
-        self.logout_process: subprocess.Popen[bytes] | None = None
         self.runtime_directory: Path | None = None
         self._owns_runtime_directory = False
         self._state = "idle"
@@ -215,9 +191,6 @@ class SessionController(QObject):
         self._display_fd: int | None = None
         self._display_notifier: QSocketNotifier | None = None
         self._display_buffer = b""
-        self._bus_fd: int | None = None
-        self._bus_notifier: QSocketNotifier | None = None
-        self._bus_buffer = b""
         self._viewport: _X11Viewport | None = None
         self._pending_viewport_size: tuple[int, int] | None = None
         self._resize_timer = QTimer(self)
@@ -239,6 +212,7 @@ class SessionController(QObject):
         self.account = account
         self._state = "starting-xephyr"
         self._finish_message = ""
+        self._display_buffer = b""
         host.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         window_id = int(host.winId())
         width = max(host.width(), 1)
@@ -307,8 +281,7 @@ class SessionController(QObject):
 
     def _apply_viewport_resize(self) -> None:
         if (
-            self._state
-            not in {"xephyr-ready", "starting-session", "running", "logging-out"}
+            self._state not in {"xephyr-ready", "running", "ending-session"}
             or self._viewport is None
             or self._pending_viewport_size is None
         ):
@@ -318,7 +291,10 @@ class SessionController(QObject):
             LOG.warning("Could not find the embedded Xephyr window to resize")
 
     def start_user_session(
-        self, account: Account, pam_environment: dict[str, str]
+        self,
+        account: Account,
+        pam_environment: dict[str, str],
+        selected_session: XSession,
     ) -> None:
         if self._state != "xephyr-ready" or not self.display:
             raise RuntimeError("Xephyr is not ready")
@@ -331,33 +307,15 @@ class SessionController(QObject):
                 self.display,
                 pam_environment,
                 self.runtime_directory,
+                selected_session,
             )
             if not os.path.isdir(account.home):
                 raise RuntimeError(f"Home directory does not exist: {account.home}")
 
-            read_fd, write_fd = os.pipe()
-            os.set_blocking(read_fd, False)
-            self._bus_fd = read_fd
-            self._bus_notifier = QSocketNotifier(
-                read_fd, QSocketNotifier.Type.Read, self
-            )
-            self._bus_notifier.activated.connect(self._read_bus_environment)
-            argv = [
-                self.commands.dbus_run_session,
-                "--config-file",
-                self.commands.dbus_session_config,
-                "--",
-                *self.commands.session_entry,
-                "--notify-fd",
-                str(write_fd),
-                "--shell",
-                self.commands.shell,
-                "--xinitrc",
-                self.commands.xinitrc,
-            ]
+            session_command = resolve_session_command(selected_session, account)
+            argv = [*self.commands.session_wrapper, *session_command]
             self.session = subprocess.Popen(
                 argv,
-                pass_fds=(write_fd,),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=account.home,
@@ -365,43 +323,20 @@ class SessionController(QObject):
                 start_new_session=True,
                 **credential_arguments(account),
             )
-            os.close(write_fd)
-            self.output.drain(self.session.stdout, "XFCE")
+            self.output.drain(self.session.stdout, selected_session.name)
             self.session_environment = environment
-            self._state = "starting-session"
+            self._state = "running"
+            self.session_ready.emit()
         except Exception as exc:
-            try:
-                os.close(write_fd)
-            except (NameError, OSError):
-                pass
-            self._begin_terminate(f"Could not start XFCE: {exc}")
+            self._begin_terminate(f"Could not start {selected_session.name}: {exc}")
 
-    def request_logout(self) -> None:
+    def request_end_session(self) -> None:
         if self._state != "running" or self.account is None:
             self._begin_terminate("")
             return
-        environment = dict(self.session_environment)
-        if not environment.get("DBUS_SESSION_BUS_ADDRESS"):
-            self._begin_terminate("")
-            return
-        argv = [self.commands.logout, "--logout", f"--display={self.display}"]
-        try:
-            self.logout_process = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                cwd=self.account.home,
-                env=environment,
-                start_new_session=True,
-                **credential_arguments(self.account),
-            )
-        except Exception:
-            LOG.exception("Could not request XFCE logout")
-            self._begin_terminate("")
-            return
-        self.output.drain(self.logout_process.stderr, "logout")
-        self._state = "logging-out"
+        self._state = "ending-session"
         self._deadline = time.monotonic() + 5.0
+        self._terminate_process(self.session)
 
     def stop(self, message: str = "") -> None:
         if not self.active:
@@ -411,11 +346,10 @@ class SessionController(QObject):
     def shutdown_blocking(self) -> None:
         if not self.active:
             return
-        self._terminate_process(self.logout_process)
         self._terminate_process(self.session)
         self._terminate_process(self.xephyr)
         deadline = time.monotonic() + 1.5
-        for process in (self.logout_process, self.session, self.xephyr):
+        for process in (self.session, self.xephyr):
             if process is None:
                 continue
             timeout = max(0.0, deadline - time.monotonic())
@@ -455,34 +389,6 @@ class SessionController(QObject):
         self._resize_timer.start(0)
         self.xephyr_ready.emit(self.display)
 
-    def _read_bus_environment(self) -> None:
-        if self._bus_fd is None:
-            return
-        try:
-            chunk = os.read(self._bus_fd, 4096)
-        except BlockingIOError:
-            return
-        if not chunk:
-            if self._state == "starting-session":
-                self._begin_terminate("XFCE did not publish its D-Bus environment")
-            return
-        self._bus_buffer += chunk
-        if b"\n" not in self._bus_buffer:
-            return
-        line, _, _ = self._bus_buffer.partition(b"\n")
-        try:
-            values = json.loads(line.decode("utf-8"))
-            address = str(values["DBUS_SESSION_BUS_ADDRESS"])
-            if not address:
-                raise ValueError("empty D-Bus address")
-        except (KeyError, ValueError, json.JSONDecodeError) as exc:
-            self._begin_terminate(f"Invalid D-Bus session information: {exc}")
-            return
-        self.session_environment["DBUS_SESSION_BUS_ADDRESS"] = address
-        self._close_bus_notifier()
-        self._state = "running"
-        self.session_ready.emit()
-
     def _poll(self) -> None:
         xephyr_code = self.xephyr.poll() if self.xephyr is not None else None
         session_code = self.session.poll() if self.session is not None else None
@@ -492,34 +398,32 @@ class SessionController(QObject):
             in {
                 "starting-xephyr",
                 "xephyr-ready",
-                "starting-session",
                 "running",
-                "logging-out",
+                "ending-session",
             }
             and xephyr_code is not None
         ):
             self._begin_terminate(
                 f"Xephyr exited unexpectedly with status {xephyr_code}"
             )
-        elif (
-            self._state in {"starting-session", "running", "logging-out"}
-            and session_code is not None
-        ):
-            message = ""
-            if session_code != 0 and self._state != "logging-out":
-                message = f"XFCE exited unexpectedly with status {session_code}"
+        elif self._state in {"running", "ending-session"} and session_code is not None:
+            message = (
+                f"The nested session exited unexpectedly with status {session_code}"
+                if session_code != 0 and self._state != "ending-session"
+                else ""
+            )
             self._begin_terminate(message)
-        elif self._state == "logging-out" and time.monotonic() >= self._deadline:
+        elif self._state == "ending-session" and time.monotonic() >= self._deadline:
+            self._kill_process(self.session)
             self._begin_terminate("")
 
         if self._state == "stopping":
             if time.monotonic() >= self._deadline:
-                self._kill_process(self.logout_process)
                 self._kill_process(self.session)
                 self._kill_process(self.xephyr)
             all_stopped = all(
                 process is None or process.poll() is not None
-                for process in (self.logout_process, self.session, self.xephyr)
+                for process in (self.session, self.xephyr)
             )
             if all_stopped:
                 self._finalize(emit=True)
@@ -533,7 +437,6 @@ class SessionController(QObject):
             self._finish_message = message
         self._state = "stopping"
         self._deadline = time.monotonic() + 2.0
-        self._terminate_process(self.logout_process)
         self._terminate_process(self.session)
         self._terminate_process(self.xephyr)
         self._timer.start()
@@ -565,7 +468,6 @@ class SessionController(QObject):
         self._timer.stop()
         self._resize_timer.stop()
         self._close_display_notifier()
-        self._close_bus_notifier()
         if self._owns_runtime_directory and self.runtime_directory is not None:
             try:
                 shutil.rmtree(self.runtime_directory)
@@ -576,7 +478,6 @@ class SessionController(QObject):
         self.session_environment = {}
         self.xephyr = None
         self.session = None
-        self.logout_process = None
         self.runtime_directory = None
         self._owns_runtime_directory = False
         self._viewport = None
@@ -597,18 +498,6 @@ class SessionController(QObject):
             except OSError:
                 pass
             self._display_fd = None
-
-    def _close_bus_notifier(self) -> None:
-        if self._bus_notifier is not None:
-            self._bus_notifier.setEnabled(False)
-            self._bus_notifier.deleteLater()
-            self._bus_notifier = None
-        if self._bus_fd is not None:
-            try:
-                os.close(self._bus_fd)
-            except OSError:
-                pass
-            self._bus_fd = None
 
 
 def invoking_account() -> Account:
@@ -663,11 +552,11 @@ def user_session_environment(
     display: str,
     pam_environment: dict[str, str],
     runtime: Path,
+    selected_session: XSession,
 ) -> dict[str, str]:
     environment = _base_environment()
-    packaged_keys = {"PATH", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS"}
     for key, value in pam_environment.items():
-        if key and key not in packaged_keys and isinstance(value, str):
+        if key and isinstance(value, str):
             environment[key] = value
     environment.update(
         {
@@ -679,15 +568,14 @@ def user_session_environment(
             "XDG_RUNTIME_DIR": str(runtime),
             "XDG_SESSION_TYPE": "x11",
             "XDG_SESSION_CLASS": "user",
-            "XDG_SESSION_DESKTOP": "xfce",
-            "XDG_CURRENT_DESKTOP": "XFCE",
-            "DESKTOP_SESSION": "xfce",
+            "XDG_SESSION_DESKTOP": selected_session.session_id,
+            "XDG_CURRENT_DESKTOP": selected_session.current_desktop,
+            "DESKTOP_SESSION": selected_session.session_id,
         }
     )
     for key in (
         "XAUTHORITY",
         "WAYLAND_DISPLAY",
-        "DBUS_SESSION_BUS_ADDRESS",
         "SESSION_MANAGER",
         "SUDO_UID",
         "SUDO_GID",
@@ -695,6 +583,10 @@ def user_session_environment(
         "SUDO_COMMAND",
     ):
         environment.pop(key, None)
+    if "DBUS_SESSION_BUS_ADDRESS" not in environment:
+        user_bus = runtime / "bus"
+        if user_bus.exists():
+            environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={user_bus}"
     return environment
 
 

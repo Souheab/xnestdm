@@ -65,12 +65,14 @@ def test_open_and_close_use_same_pam_handle(monkeypatch) -> None:
         lambda pam_handle: setattr(calls, "ended", calls.ended + 1),
     )
 
-    environment = transaction.open(":101", "launcher")
+    environment = transaction.open(":101", "launcher", "plasmax11", "KDE")
     transaction.close()
     transaction.close()
 
     assert handle.opened and handle.closed
     assert environment["DISPLAY"] == ":101"
+    assert environment["XDG_SESSION_DESKTOP"] == "plasmax11"
+    assert environment["XDG_CURRENT_DESKTOP"] == "KDE"
     assert calls.setcred == 1
     assert calls.ended == 1
     assert transaction.closed
@@ -83,7 +85,7 @@ def test_login_service_skips_session_hooks(monkeypatch) -> None:
     monkeypatch.setattr("userdesk.auth.pamela.PAM_SETCRED", lambda *args: 0)
     monkeypatch.setattr("userdesk.auth.pamela.pam_end", lambda handle: None)
 
-    environment = transaction.open(":101", "launcher")
+    environment = transaction.open(":101", "launcher", "custom", "Custom")
     transaction.close()
 
     assert environment["DISPLAY"] == ":101"

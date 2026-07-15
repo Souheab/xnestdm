@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "userdesk"
 version = "0.1.0"
-description = "A PySide6 host for an embedded Xephyr XFCE session"
+description = "A nested X11 display manager embedded with Xephyr"
 requires-python = ">=3.11"
 dependencies = [
   "pamela>=1.2",
@@ -14,7 +14,6 @@ dependencies = [
 
 [project.scripts]
 userdesk = "userdesk.__main__:main"
-userdesk-session-entry = "userdesk.session_entry:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

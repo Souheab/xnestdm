@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QComboBox,
     QSizePolicy,
     QStackedWidget,
     QToolBar,
@@ -26,6 +27,7 @@ from .auth import (
     SessionOpenOutcome,
 )
 from .session import SessionController, invoking_account
+from .xsessions import XSession, discover_xsessions, preferred_xsession_index
 
 LOG = logging.getLogger(__name__)
 OTHER_USERS_DISABLED = (
@@ -35,15 +37,24 @@ VIEWPORT_PADDING = 12
 
 
 class LoginPage(QWidget):
-    submitted = Signal(str, str)
-    current_user_requested = Signal()
+    submitted = Signal(str, str, object)
+    current_user_requested = Signal(object)
 
-    def __init__(self, current_username: str, allow_other_users: bool) -> None:
+    def __init__(
+        self,
+        current_username: str,
+        allow_other_users: bool,
+        sessions: list[XSession],
+    ) -> None:
         super().__init__()
         self.allow_other_users = allow_other_users
         self.username = QLineEdit()
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.session = QComboBox()
+        for xsession in sessions:
+            self.session.addItem(xsession.name, xsession)
+        self.session.setCurrentIndex(preferred_xsession_index(sessions))
         self.login_button = QPushButton("Log In")
         self.current_user_button = QPushButton(f"Use Current User ({current_username})")
         self.other_user_label = QLabel("Log in as another user")
@@ -51,6 +62,7 @@ class LoginPage(QWidget):
         self.status.setWordWrap(True)
 
         form = QFormLayout()
+        form.addRow("Session:", self.session)
         form.addRow("Username:", self.username)
         form.addRow("Password:", self.password)
 
@@ -61,7 +73,7 @@ class LoginPage(QWidget):
         panel = QWidget()
         panel.setMaximumWidth(440)
         panel_layout = QVBoxLayout(panel)
-        panel_layout.addWidget(QLabel("Start an XFCE session"))
+        panel_layout.addWidget(QLabel("Start a nested X session"))
         panel_layout.addWidget(self.current_user_button)
         panel_layout.addWidget(self.other_user_label)
         panel_layout.addLayout(form)
@@ -78,7 +90,7 @@ class LoginPage(QWidget):
         layout.addStretch(1)
 
         self.login_button.clicked.connect(self._submit)
-        self.current_user_button.clicked.connect(self.current_user_requested)
+        self.current_user_button.clicked.connect(self._request_current_user)
         self.password.returnPressed.connect(self._submit)
         self.username.returnPressed.connect(self.password.setFocus)
         self.set_busy(False)
@@ -89,6 +101,7 @@ class LoginPage(QWidget):
         self.password.setEnabled(authentication_enabled)
         self.login_button.setEnabled(authentication_enabled)
         self.current_user_button.setEnabled(not busy)
+        self.session.setEnabled(not busy)
         self.status.setText(message)
 
     def clear_form(self) -> None:
@@ -106,7 +119,16 @@ class LoginPage(QWidget):
         if not username or not password:
             self.status.setText("Enter a username and password")
             return
-        self.submitted.emit(username, password)
+        self.submitted.emit(username, password, self.selected_session())
+
+    def _request_current_user(self) -> None:
+        self.current_user_requested.emit(self.selected_session())
+
+    def selected_session(self) -> XSession:
+        session = self.session.currentData()
+        if not isinstance(session, XSession):
+            raise RuntimeError("No X session is selected")
+        return session
 
 
 class ViewportHost(QWidget):
@@ -140,7 +162,7 @@ class DesktopPage(QWidget):
 
 class MainWindow(QMainWindow):
     authenticate_requested = Signal(str, str, str)
-    pam_open_requested = Signal(str, str)
+    pam_open_requested = Signal(str, str, str, str)
     pam_close_requested = Signal()
 
     def __init__(self, pam_service: str, allow_other_users: bool):
@@ -149,6 +171,8 @@ class MainWindow(QMainWindow):
         self.allow_other_users = allow_other_users
         self.current_account = invoking_account()
         self.account: Account | None = None
+        self.selected_session: XSession | None = None
+        self.pending_session: XSession | None = None
         self.pam_session_required = False
         self.pending_message = ""
         self.closing = False
@@ -157,7 +181,9 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self.login_page = LoginPage(
-            self.current_account.username, self.allow_other_users
+            self.current_account.username,
+            self.allow_other_users,
+            discover_xsessions(home=self.current_account.home),
         )
         if not self.allow_other_users:
             self.login_page.status.setText(OTHER_USERS_DISABLED)
@@ -170,7 +196,7 @@ class MainWindow(QMainWindow):
         self.toolbar = QToolBar("Session", self)
         self.toolbar.setMovable(False)
         self.user_label = QLabel()
-        self.logout_button = QPushButton("Log Out")
+        self.logout_button = QPushButton("End Session")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.toolbar.addWidget(self.user_label)
@@ -201,9 +227,11 @@ class MainWindow(QMainWindow):
 
         self.login_page.submitted.connect(self._authenticate)
         self.login_page.current_user_requested.connect(self._use_current_user)
-        self.logout_button.clicked.connect(self._confirm_logout)
+        self.logout_button.clicked.connect(self._confirm_end_session)
 
-    def _authenticate(self, username: str, password: str) -> None:
+    def _authenticate(
+        self, username: str, password: str, selected_session: XSession
+    ) -> None:
         if self.account is not None or self.session_controller.active:
             return
         if not self.allow_other_users:
@@ -211,6 +239,7 @@ class MainWindow(QMainWindow):
             return
         self.login_page.set_busy(True, "Authenticating…")
         self.login_page.password.clear()
+        self.pending_session = selected_session
         self.authenticate_requested.emit(username, password, self.pam_service)
         password = ""  # drop this reference as soon as Qt has queued the call
 
@@ -218,21 +247,42 @@ class MainWindow(QMainWindow):
         if self.closing:
             return
         if not outcome.ok or outcome.account is None:
+            self.pending_session = None
             self.login_page.set_busy(False, outcome.message or "Authentication failed")
             self.login_page.password.setFocus()
             return
-        self._start_account(outcome.account, pam_session_required=True)
+        if self.pending_session is None:
+            self.login_page.set_busy(False, "No X session is selected")
+            return
+        self._start_account(
+            outcome.account,
+            self.pending_session,
+            pam_session_required=True,
+        )
 
-    def _use_current_user(self) -> None:
+    def _use_current_user(self, selected_session: XSession) -> None:
         if self.account is not None or self.session_controller.active:
             return
-        self.login_page.set_busy(True, "Starting XFCE…")
-        self._start_account(self.current_account, pam_session_required=False)
+        self.login_page.set_busy(True, f"Starting {selected_session.name}…")
+        self._start_account(
+            self.current_account,
+            selected_session,
+            pam_session_required=False,
+        )
 
-    def _start_account(self, account: Account, pam_session_required: bool) -> None:
+    def _start_account(
+        self,
+        account: Account,
+        selected_session: XSession,
+        pam_session_required: bool,
+    ) -> None:
         self.account = account
+        self.selected_session = selected_session
+        self.pending_session = None
         self.pam_session_required = pam_session_required
-        self.user_label.setText(f"Logged in as {self.account.username}")
+        self.user_label.setText(
+            f"{self.account.username} — {self.selected_session.name}"
+        )
         self.logout_button.setEnabled(False)
         self.toolbar.show()
         self.pages.setCurrentWidget(self.desktop_page)
@@ -249,45 +299,54 @@ class MainWindow(QMainWindow):
                 self._reset_login(self.pending_message)
 
     def _on_xephyr_ready(self, display: str) -> None:
-        if self.closing or self.account is None:
+        if self.closing or self.account is None or self.selected_session is None:
             return
         if not self.pam_session_required:
-            self.session_controller.start_user_session(self.account, {})
+            self.session_controller.start_user_session(
+                self.account, {}, self.selected_session
+            )
             return
         try:
             invoking_user = invoking_account().username
         except Exception:
             invoking_user = ""
-        self.pam_open_requested.emit(display, invoking_user)
+        self.pam_open_requested.emit(
+            display,
+            invoking_user,
+            self.selected_session.session_id,
+            self.selected_session.current_desktop,
+        )
 
     def _on_pam_open_finished(self, outcome: SessionOpenOutcome) -> None:
         if self.closing:
             return
-        if not outcome.ok or self.account is None:
+        if not outcome.ok or self.account is None or self.selected_session is None:
             self.session_controller.stop(
                 outcome.message or "Could not open PAM session"
             )
             return
         self.session_controller.start_user_session(
-            self.account, outcome.environment or {}
+            self.account,
+            outcome.environment or {},
+            self.selected_session,
         )
 
     def _on_session_ready(self) -> None:
         if not self.closing:
             self.logout_button.setEnabled(True)
 
-    def _confirm_logout(self) -> None:
+    def _confirm_end_session(self) -> None:
         answer = QMessageBox.question(
             self,
-            "Log Out",
-            "Log out of the nested XFCE session?",
+            "End Session",
+            "End the nested X session?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.logout_button.setEnabled(False)
-        self.session_controller.request_logout()
+        self.session_controller.request_end_session()
 
     def _on_session_finished(self, message: str) -> None:
         if self.closing:
@@ -308,6 +367,8 @@ class MainWindow(QMainWindow):
         if not message and not self.allow_other_users:
             message = OTHER_USERS_DISABLED
         self.account = None
+        self.selected_session = None
+        self.pending_session = None
         self.pam_session_required = False
         self.pending_message = ""
         self.logout_button.setEnabled(False)

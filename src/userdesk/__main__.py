@@ -10,7 +10,7 @@ from . import __version__
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run an XFCE desktop inside an embedded Xephyr server"
+        description="Run host X11 sessions inside an embedded Xephyr server"
     )
     parser.add_argument("--pam-service", help="override the PAM service name")
     parser.add_argument("--verbose", action="store_true", help="enable debug logging")
