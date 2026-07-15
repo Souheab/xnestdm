@@ -4,10 +4,9 @@ import logging
 import os
 import pwd
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import pamela
-from PySide6.QtCore import QObject, Signal, Slot
 
 LOG = logging.getLogger(__name__)
 AUTHENTICATION_ONLY_SERVICES = {"login"}
@@ -35,8 +34,15 @@ class Account:
     groups: tuple[int, ...]
 
     @classmethod
+    def from_uid(cls, uid: int) -> "Account":
+        return cls._from_record(pwd.getpwuid(uid))
+
+    @classmethod
     def from_username(cls, username: str) -> "Account":
-        record = pwd.getpwnam(username)
+        return cls._from_record(pwd.getpwnam(username))
+
+    @classmethod
+    def _from_record(cls, record: Any) -> "Account":
         groups = tuple(sorted(set(os.getgrouplist(record.pw_name, record.pw_gid))))
         return cls(
             username=record.pw_name,
@@ -47,6 +53,36 @@ class Account:
             groups=groups,
         )
 
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "username": self.username,
+            "uid": self.uid,
+            "gid": self.gid,
+            "home": self.home,
+            "shell": self.shell,
+            "groups": list(self.groups),
+        }
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, object]) -> "Account":
+        username = values.get("username")
+        uid = values.get("uid")
+        gid = values.get("gid")
+        home = values.get("home")
+        shell = values.get("shell")
+        groups = values.get("groups")
+        if not (
+            isinstance(username, str)
+            and isinstance(uid, int)
+            and isinstance(gid, int)
+            and isinstance(home, str)
+            and isinstance(shell, str)
+            and isinstance(groups, list)
+            and all(isinstance(group, int) for group in groups)
+        ):
+            raise ValueError("Invalid account data from privileged helper")
+        return cls(username, uid, gid, home, shell, tuple(groups))
+
 
 @dataclass(frozen=True)
 class AuthenticationOutcome:
@@ -56,9 +92,8 @@ class AuthenticationOutcome:
 
 
 @dataclass(frozen=True)
-class SessionOpenOutcome:
+class SessionStartOutcome:
     ok: bool
-    environment: dict[str, str] | None = None
     message: str = ""
 
 
@@ -147,80 +182,6 @@ class PamTransaction:
         self.closed = True
         if first_error:
             raise first_error
-
-
-class PamWorker(QObject):
-    authentication_finished = Signal(object)
-    session_open_finished = Signal(object)
-    session_closed = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.transaction: PamTransaction | None = None
-
-    @Slot(str, str, str)
-    def authenticate(self, username: str, password: str, service: str) -> None:
-        self._close(suppress=True)
-        try:
-            self.transaction = PamTransaction.authenticate(username, password, service)
-        except KeyError:
-            outcome = AuthenticationOutcome(False, message="Authentication failed")
-        except pamela.PAMError as exc:
-            message = (
-                "The account or password has expired"
-                if exc.errno in EXPIRED_CODES
-                else "Authentication failed"
-            )
-            outcome = AuthenticationOutcome(False, message=message)
-        except Exception:
-            LOG.exception("PAM authentication failed unexpectedly")
-            outcome = AuthenticationOutcome(False, message="Authentication failed")
-        else:
-            outcome = AuthenticationOutcome(True, account=self.transaction.account)
-        self.authentication_finished.emit(outcome)
-
-    @Slot(str, str, str, str)
-    def open_session(
-        self,
-        display: str,
-        invoking_user: str,
-        session_id: str,
-        current_desktop: str,
-    ) -> None:
-        if self.transaction is None:
-            self.session_open_finished.emit(
-                SessionOpenOutcome(False, message="No authenticated PAM transaction")
-            )
-            return
-        try:
-            environment = self.transaction.open(
-                display, invoking_user, session_id, current_desktop
-            )
-        except Exception:
-            LOG.exception("Could not open PAM session")
-            self._close(suppress=True)
-            outcome = SessionOpenOutcome(
-                False, message="Could not open the PAM session"
-            )
-        else:
-            outcome = SessionOpenOutcome(True, environment=environment)
-        self.session_open_finished.emit(outcome)
-
-    @Slot()
-    def close_session(self) -> None:
-        self._close(suppress=True)
-        self.session_closed.emit()
-
-    def _close(self, suppress: bool) -> None:
-        transaction, self.transaction = self.transaction, None
-        if transaction is None:
-            return
-        try:
-            transaction.close()
-        except Exception:
-            if not suppress:
-                raise
-            LOG.exception("PAM cleanup failed")
 
 
 def select_pam_service(override: str | None) -> str:

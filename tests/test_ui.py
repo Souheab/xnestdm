@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QObject, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QResizeEvent
 
 from xnestdm.app import DesktopPage, LoginPage, MainWindow
+from xnestdm.auth import Account, AuthenticationOutcome, SessionStartOutcome
 from xnestdm.xsessions import XSession
 
 
@@ -16,6 +17,32 @@ SESSION = XSession(
     ("Test",),
     Path("/host/test-session.desktop"),
 )
+
+
+class FakeHelper(QObject):
+    authentication_finished = Signal(object)
+    session_start_finished = Signal(object)
+    session_finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.auth_requests = []
+        self.session_requests = []
+        self.stop_requests = 0
+        self.shutdown_requests = 0
+
+    def authenticate(self, username, password) -> None:
+        self.auth_requests.append((username, password))
+
+    def start_session(self, display, session) -> None:
+        self.session_requests.append((display, session))
+
+    def stop_session(self) -> None:
+        self.stop_requests += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_requests += 1
 
 
 def test_login_form_uses_password_echo_and_emits_credentials(qapp) -> None:
@@ -82,21 +109,15 @@ def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
 
 
 def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:
-    window = MainWindow("xnestdm", allow_other_users=True)
-    window.authenticate_requested.disconnect(window.pam_worker.authenticate)
-    requests: list[tuple[str, str, str]] = []
-    window.authenticate_requested.connect(
-        lambda username, password, service: requests.append(
-            (username, password, service)
-        )
-    )
+    helper = FakeHelper()
+    window = MainWindow(helper)  # type: ignore[arg-type]
     window.login_page.password.setText("secret")
 
     window._authenticate("alice", "secret", SESSION)
 
     assert window.login_page.password.text() == ""
     assert not window.login_page.login_button.isEnabled()
-    assert requests == [("alice", "secret", "xnestdm")]
+    assert helper.auth_requests == [("alice", "secret")]
     assert window.toolbar.isHidden()
     window.close()
 
@@ -117,7 +138,7 @@ def test_unprivileged_login_page_only_allows_current_user(qapp) -> None:
 
 
 def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
-    window = MainWindow("xnestdm", allow_other_users=False)
+    window = MainWindow()
     starts = []
     monkeypatch.setattr(
         window.session_controller,
@@ -133,7 +154,6 @@ def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
     assert window.pages.currentWidget() is window.desktop_page
 
     sessions = []
-    pam_requests = []
     monkeypatch.setattr(
         window.session_controller,
         "start_user_session",
@@ -141,13 +161,35 @@ def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
             (account, environment, session)
         ),
     )
-    window.pam_open_requested.connect(
-        lambda display, username, session_id, desktop: pam_requests.append(
-            (display, username, session_id, desktop)
-        )
-    )
     window._on_xephyr_ready(":7")
 
     assert sessions == [(window.current_account, {}, SESSION)]
-    assert pam_requests == []
+    window.close()
+
+
+def test_alternate_user_routes_session_through_helper(qapp, monkeypatch) -> None:
+    helper = FakeHelper()
+    window = MainWindow(helper)  # type: ignore[arg-type]
+    account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
+    starts = []
+    monkeypatch.setattr(
+        window.session_controller,
+        "start_xephyr",
+        lambda host, selected_account: starts.append(selected_account),
+    )
+
+    window._authenticate("alice", "secret", SESSION)
+    helper.authentication_finished.emit(AuthenticationOutcome(True, account))
+
+    assert starts == [account]
+    assert window.helper_transaction_pending
+
+    window._on_xephyr_ready(":9")
+    assert helper.session_requests == [(":9", SESSION)]
+
+    monkeypatch.setattr(
+        window.session_controller, "mark_remote_session_started", lambda: None
+    )
+    helper.session_start_finished.emit(SessionStartOutcome(True))
+    assert window.remote_session_active
     window.close()

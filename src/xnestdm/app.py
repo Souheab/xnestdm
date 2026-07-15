@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QMetaObject, QThread, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QFormLayout,
@@ -23,9 +23,9 @@ from PySide6.QtWidgets import (
 from .auth import (
     Account,
     AuthenticationOutcome,
-    PamWorker,
-    SessionOpenOutcome,
+    SessionStartOutcome,
 )
+from .helper_client import HelperClient
 from .session import SessionController, invoking_account
 from .xsessions import XSession, discover_xsessions, preferred_xsession_index
 
@@ -105,6 +105,10 @@ class LoginPage(QWidget):
         self.session.setEnabled(not busy)
         self.status.setText(message)
 
+    def set_allow_other_users(self, allowed: bool, message: str = "") -> None:
+        self.allow_other_users = allowed
+        self.set_busy(False, message)
+
     def clear_form(self) -> None:
         self.username.clear()
         self.password.clear()
@@ -162,19 +166,17 @@ class DesktopPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    authenticate_requested = Signal(str, str, str)
-    pam_open_requested = Signal(str, str, str, str)
-    pam_close_requested = Signal()
-
-    def __init__(self, pam_service: str, allow_other_users: bool):
+    def __init__(self, helper_client: HelperClient | None = None):
         super().__init__()
-        self.pam_service = pam_service
-        self.allow_other_users = allow_other_users
+        self.helper_client = helper_client
+        self.allow_other_users = helper_client is not None
         self.current_account = invoking_account()
         self.account: Account | None = None
         self.selected_session: XSession | None = None
         self.pending_session: XSession | None = None
         self.pam_session_required = False
+        self.helper_transaction_pending = False
+        self.remote_session_active = False
         self.pending_message = ""
         self.closing = False
 
@@ -213,18 +215,17 @@ class MainWindow(QMainWindow):
         self.session_controller.session_ready.connect(self._on_session_ready)
         self.session_controller.finished.connect(self._on_session_finished)
 
-        self.pam_thread = QThread(self)
-        self.pam_worker = PamWorker()
-        self.pam_worker.moveToThread(self.pam_thread)
-        self.authenticate_requested.connect(self.pam_worker.authenticate)
-        self.pam_open_requested.connect(self.pam_worker.open_session)
-        self.pam_close_requested.connect(self.pam_worker.close_session)
-        self.pam_worker.authentication_finished.connect(
-            self._on_authentication_finished
-        )
-        self.pam_worker.session_open_finished.connect(self._on_pam_open_finished)
-        self.pam_worker.session_closed.connect(self._on_pam_closed)
-        self.pam_thread.start()
+        if self.helper_client is not None:
+            self.helper_client.authentication_finished.connect(
+                self._on_authentication_finished
+            )
+            self.helper_client.session_start_finished.connect(
+                self._on_session_start_finished
+            )
+            self.helper_client.session_finished.connect(
+                self._on_helper_session_finished
+            )
+            self.helper_client.failed.connect(self._on_helper_failed)
 
         self.login_page.submitted.connect(self._authenticate)
         self.login_page.current_user_requested.connect(self._use_current_user)
@@ -241,19 +242,25 @@ class MainWindow(QMainWindow):
         self.login_page.set_busy(True, "Authenticating…")
         self.login_page.password.clear()
         self.pending_session = selected_session
-        self.authenticate_requested.emit(username, password, self.pam_service)
+        if self.helper_client is None:
+            self.login_page.set_busy(False, OTHER_USERS_DISABLED)
+            return
+        self.helper_client.authenticate(username, password)
         password = ""  # drop this reference as soon as Qt has queued the call
 
     def _on_authentication_finished(self, outcome: AuthenticationOutcome) -> None:
         if self.closing:
             return
         if not outcome.ok or outcome.account is None:
+            self.helper_transaction_pending = False
             self.pending_session = None
             self.login_page.set_busy(False, outcome.message or "Authentication failed")
             self.login_page.password.setFocus()
             return
+        self.helper_transaction_pending = True
         if self.pending_session is None:
             self.login_page.set_busy(False, "No X session is selected")
+            self._request_helper_stop()
             return
         self._start_account(
             outcome.account,
@@ -295,7 +302,7 @@ class MainWindow(QMainWindow):
             LOG.exception("Could not begin Xephyr startup")
             self.pending_message = f"Could not start Xephyr: {exc}"
             if self.pam_session_required:
-                self.pam_close_requested.emit()
+                self._request_helper_stop()
             else:
                 self._reset_login(self.pending_message)
 
@@ -307,30 +314,31 @@ class MainWindow(QMainWindow):
                 self.account, {}, self.selected_session
             )
             return
-        try:
-            invoking_user = invoking_account().username
-        except Exception:
-            invoking_user = ""
-        self.pam_open_requested.emit(
+        if self.helper_client is None:
+            self.helper_transaction_pending = False
+            self.session_controller.stop("Privileged helper is unavailable")
+            return
+        self.helper_client.start_session(
             display,
-            invoking_user,
-            self.selected_session.session_id,
-            self.selected_session.current_desktop,
-        )
-
-    def _on_pam_open_finished(self, outcome: SessionOpenOutcome) -> None:
-        if self.closing:
-            return
-        if not outcome.ok or self.account is None or self.selected_session is None:
-            self.session_controller.stop(
-                outcome.message or "Could not open PAM session"
-            )
-            return
-        self.session_controller.start_user_session(
-            self.account,
-            outcome.environment or {},
             self.selected_session,
         )
+
+    def _on_session_start_finished(self, outcome: SessionStartOutcome) -> None:
+        if self.closing:
+            return
+        if not outcome.ok:
+            self.helper_transaction_pending = False
+            self.session_controller.stop(
+                outcome.message or "Could not start the nested session"
+            )
+            return
+        self.remote_session_active = True
+        try:
+            self.session_controller.mark_remote_session_started()
+        except Exception as exc:
+            LOG.exception("Could not complete privileged session startup")
+            self.pending_message = f"Could not start the nested session: {exc}"
+            self._request_helper_stop()
 
     def _on_session_ready(self) -> None:
         if not self.closing:
@@ -347,22 +355,53 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.logout_button.setEnabled(False)
-        self.session_controller.request_end_session()
+        if self.pam_session_required:
+            self._request_helper_stop()
+        else:
+            self.session_controller.request_end_session()
 
     def _on_session_finished(self, message: str) -> None:
         if self.closing:
             return
         self.pending_message = message
-        if self.pam_session_required:
-            self.pam_close_requested.emit()
+        if self.pam_session_required and self.helper_transaction_pending:
+            self._request_helper_stop()
         else:
             self._reset_login(message)
 
-    def _on_pam_closed(self) -> None:
+    def _on_helper_session_finished(self, message: str) -> None:
         if self.closing:
             return
-        message, self.pending_message = self.pending_message, ""
-        self._reset_login(message)
+        self.helper_transaction_pending = False
+        self.remote_session_active = False
+        final_message = message or self.pending_message
+        self.pending_message = final_message
+        if self.session_controller.active:
+            self.session_controller.stop(final_message)
+        else:
+            self._reset_login(final_message)
+
+    def _on_helper_failed(self, message: str) -> None:
+        if self.closing:
+            return
+        self.helper_transaction_pending = False
+        self.remote_session_active = False
+        self.helper_client = None
+        self.allow_other_users = False
+        self.login_page.set_allow_other_users(
+            False, "" if self.session_controller.active else message
+        )
+        if self.session_controller.active:
+            self.session_controller.stop(message)
+
+    def _request_helper_stop(self) -> None:
+        if self.helper_client is None:
+            self.helper_transaction_pending = False
+            self.remote_session_active = False
+            if self.session_controller.active:
+                self.session_controller.stop("Privileged helper is unavailable")
+            return
+        self.helper_client.stop_session()
 
     def _reset_login(self, message: str) -> None:
         if not message and not self.allow_other_users:
@@ -371,6 +410,8 @@ class MainWindow(QMainWindow):
         self.selected_session = None
         self.pending_session = None
         self.pam_session_required = False
+        self.helper_transaction_pending = False
+        self.remote_session_active = False
         self.pending_message = ""
         self.logout_button.setEnabled(False)
         self.toolbar.hide()
@@ -380,12 +421,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.closing = True
+        if self.helper_client is not None:
+            self.helper_client.shutdown()
         self.session_controller.shutdown_blocking()
-        QMetaObject.invokeMethod(
-            self.pam_worker,
-            "close_session",
-            Qt.ConnectionType.BlockingQueuedConnection,
-        )
-        self.pam_thread.quit()
-        self.pam_thread.wait(3000)
         event.accept()

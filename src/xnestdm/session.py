@@ -330,6 +330,12 @@ class SessionController(QObject):
         except Exception as exc:
             self._begin_terminate(f"Could not start {selected_session.name}: {exc}")
 
+    def mark_remote_session_started(self) -> None:
+        if self._state != "xephyr-ready" or not self.display:
+            raise RuntimeError("Xephyr is not ready")
+        self._state = "running"
+        self.session_ready.emit()
+
     def request_end_session(self) -> None:
         if self._state != "running" or self.account is None:
             self._begin_terminate("")

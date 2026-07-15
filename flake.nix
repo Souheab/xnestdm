@@ -71,9 +71,35 @@
         default = self.apps.${system}.xnestdm;
       });
 
-      checks = forAllSystems (system: {
-        xnestdm = self.packages.${system}.xnestdm;
-      });
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          moduleConfig =
+            (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.default
+                {
+                  programs.xnestdm.enable = true;
+                  system.stateVersion = "26.05";
+                }
+              ];
+            }).config;
+          hasHelperWrapper = builtins.hasAttr "xnestdm-helper" moduleConfig.security.wrappers;
+          hasGuiWrapper = builtins.hasAttr "xnestdm" moduleConfig.security.wrappers;
+        in
+        {
+          xnestdm = self.packages.${system}.xnestdm;
+          module =
+            assert hasHelperWrapper;
+            assert moduleConfig.security.wrappers."xnestdm-helper".setuid;
+            assert !hasGuiWrapper;
+            pkgs.runCommand "xnestdm-module-check" { } ''
+              touch $out
+            '';
+        }
+      );
 
       devShells = forAllSystems (
         system:

@@ -49,10 +49,12 @@ another user, preserve the outer X connection and the host session catalog:
 sudo --preserve-env=DISPLAY,XAUTHORITY,XDG_DATA_DIRS nix run .
 ```
 
-The current-user button still refers to the original `sudo` invoker rather than
-root. When the NixOS module is enabled, its installed `xnestdm` command already
-knows the configured host session directory and wrapper, so only the outer X
-credentials need to survive `sudo`.
+Before Qt is loaded, this starts a small privileged helper and permanently
+drops the GUI process back to the original `sudo` user. The current-user button
+therefore refers to that user rather than root. When the NixOS module is
+enabled, its installed `xnestdm` command already knows the configured host
+session directory and wrapper, so only the outer X credentials need to survive
+`sudo`.
 
 If `XAUTHORITY` is normally unset but the display cookie is stored in
 `~/.Xauthority`, provide it explicitly before `sudo`:
@@ -123,18 +125,18 @@ xnestdm
 ```
 
 The module installs the package and PAM policy, connects the configured host X
-sessions, and creates `/run/wrappers/bin/xnestdm` as a setuid-root NixOS
-security wrapper. The wrapper is generated during system activation and takes
-precedence in users' `PATH`; the package in the immutable Nix store is not made
-setuid. xnestdm drops to the appropriate unprivileged account before starting
-Xephyr or the nested desktop. The GUI and PAM transaction retain effective
-root privileges while xnestdm is running, as they do when it is launched
-through `sudo`.
+sessions, and creates `/run/wrappers/bin/xnestdm-helper` as a setuid-root NixOS
+security wrapper. The public `xnestdm` command, its Qt GUI, and Xephyr always
+run as the invoking user. The helper contains no Qt code and is used only for
+PAM authentication, starting the authenticated user's desktop with that user's
+credentials, supervising it, and closing the PAM session at logout.
 
-For safety, the privileged launcher ignores caller-supplied Python, QML, and Qt
-plugin paths and does not allow `--pam-service`; it always uses the module's
-dedicated `xnestdm` PAM service. The module does not install a desktop
-environment.
+The GUI and helper communicate over a private socket for the lifetime of the
+application. If the helper is unavailable, current-user sessions still work
+and the username/password controls are disabled. The privileged helper ignores
+caller-supplied Python, PAM-service, session-wrapper, QML, and Qt plugin
+overrides; the module always uses its dedicated `xnestdm` PAM service. The
+module does not install a desktop environment.
 
 ## Troubleshooting
 
@@ -142,6 +144,9 @@ environment.
   desired desktop available through a standard X session `.desktop` entry or a
   user X session script.
 - A session entry with a missing `TryExec` target is intentionally hidden.
+- If alternate-user controls are disabled after enabling the module, apply the
+  configuration with `nixos-rebuild switch` and check that
+  `/run/wrappers/bin/xnestdm-helper` exists.
 - Desktop startup, D-Bus, profile loading, and logout behavior come from the
   host's session entry and wrapper. xnestdm only launches and supervises them.
 - **End Session** sends the nested session process group a graceful termination

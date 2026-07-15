@@ -168,6 +168,19 @@ def test_selected_session_is_started_through_host_wrapper(
     assert controller._state == "running"
 
 
+def test_remote_session_marks_existing_xephyr_running(qapp) -> None:
+    controller = SessionController()
+    controller._state = "xephyr-ready"
+    controller.display = ":8"
+    ready = []
+    controller.session_ready.connect(lambda: ready.append(True))
+
+    controller.mark_remote_session_started()
+
+    assert controller._state == "running"
+    assert ready == [True]
+
+
 def test_end_session_terminates_session_before_xephyr(qapp, monkeypatch) -> None:
     controller = SessionController()
     controller._state = "running"

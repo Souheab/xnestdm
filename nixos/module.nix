@@ -16,6 +16,10 @@ let
       ]
       ++ lib.optionals (sessionData ? wrapper) [
         "--set XNESTDM_XSESSION_WRAPPER ${sessionData.wrapper}"
+      ]
+      ++ [
+        "--set XNESTDM_HELPER /run/wrappers/bin/xnestdm-helper"
+        "--set XNESTDM_PAM_SERVICE xnestdm"
       ];
   });
 in
@@ -32,10 +36,10 @@ in
 
     environment.systemPackages = [ package ];
 
-    # xnestdm authenticates the selected account before using these privileges.
-    # NixOS places this wrapper first in interactive users' PATH.
-    security.wrappers.xnestdm = {
-      source = lib.getExe package;
+    # Only the non-Qt PAM/session helper receives privileges. The GUI and
+    # embedded Xephyr server always run as the invoking user.
+    security.wrappers.xnestdm-helper = {
+      source = lib.getExe' package "xnestdm-helper";
       owner = "root";
       group = "root";
       setuid = true;

@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 xnestdm = "xnestdm.__main__:main"
+xnestdm-helper = "xnestdm.helper:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

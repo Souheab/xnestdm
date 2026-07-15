@@ -3,9 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-import pamela
 
-from xnestdm.auth import Account, PamTransaction, PamWorker, select_pam_service
+from xnestdm.auth import Account, PamTransaction, select_pam_service
 
 
 class FakeHandle:
@@ -116,23 +115,6 @@ def test_pam_service_selection(monkeypatch) -> None:
     assert select_pam_service(None) == "login"
 
 
-@pytest.mark.parametrize(
-    ("error_number", "expected"),
-    [
-        (7, "Authentication failed"),
-        (12, "The account or password has expired"),
-    ],
-)
-def test_worker_classifies_pam_failures(monkeypatch, error_number, expected) -> None:
-    def fail(*args, **kwargs):
-        raise pamela.PAMError(errno=error_number)
-
-    monkeypatch.setattr(PamTransaction, "authenticate", fail)
-    worker = PamWorker()
-    outcomes = []
-    worker.authentication_finished.connect(outcomes.append)
-
-    worker.authenticate("alice", "bad", "xnestdm")
-
-    assert outcomes[0].ok is False
-    assert outcomes[0].message == expected
+def test_account_protocol_mapping_round_trip() -> None:
+    account = Account("alice", 1001, 1002, "/home/alice", "/bin/sh", (7, 1002))
+    assert Account.from_mapping(account.to_mapping()) == account
