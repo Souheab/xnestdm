@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
 
 from userdesk.app import DesktopPage, LoginPage, MainWindow
 
@@ -35,10 +35,25 @@ def test_busy_state_and_clear_form(qapp) -> None:
     assert page.login_button.isEnabled()
 
 
-def test_desktop_host_is_native_and_focusable(qapp) -> None:
+def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
     page = DesktopPage()
     assert page.host.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
     assert page.host.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    margins = page.layout().contentsMargins()
+    assert (
+        margins.left(),
+        margins.top(),
+        margins.right(),
+        margins.bottom(),
+    ) == (12, 12, 12, 12)
+
+    page.resize(900, 700)
+    page.layout().setGeometry(page.rect())
+    assert page.host.geometry() == QRect(12, 12, 876, 676)
+
+    page.resize(640, 480)
+    page.layout().setGeometry(page.rect())
+    assert page.host.geometry() == QRect(12, 12, 616, 456)
 
 
 def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:

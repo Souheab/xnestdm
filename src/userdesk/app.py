@@ -30,6 +30,7 @@ LOG = logging.getLogger(__name__)
 OTHER_USERS_DISABLED = (
     "Log in as another user is disabled. Start Userdesk with sudo to enable it."
 )
+VIEWPORT_PADDING = 12
 
 
 class LoginPage(QWidget):
@@ -113,8 +114,16 @@ class DesktopPage(QWidget):
         self.host = QWidget()
         self.host.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.host.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(
+            VIEWPORT_PADDING,
+            VIEWPORT_PADDING,
+            VIEWPORT_PADDING,
+            VIEWPORT_PADDING,
+        )
         layout.setSpacing(0)
         layout.addWidget(self.host)
 
