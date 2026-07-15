@@ -21,7 +21,7 @@ system X session script under `/etc/X11`.
 - Nix with flakes enabled
 - At least one host X11 session entry or a usable user/system X session script
 - A usable host PAM service and local/NSS-visible accounts when switching users
-- Optional `sudo` access for authenticating and switching to another user
+- The NixOS module, or `sudo` for standalone alternate-user sessions
 
 This is not a sandbox. A nested session uses the selected user's normal home,
 configuration, devices, network, runtime services, and host permissions.
@@ -109,9 +109,32 @@ configured X session catalog and wrapper, and creates a dedicated PAM service:
 }
 ```
 
-The module does not install a desktop environment or a setuid GUI. Start the
-installed `xnestdm` command normally for a current-user session, or through
-`sudo` to enable switching users.
+Apply the system configuration once (as with any NixOS system change):
+
+```console
+sudo nixos-rebuild switch --flake /path/to/config#my-host
+```
+
+After that, start `xnestdm` as your normal user. Both the current-user path and
+password-authenticated local-user logins work without `sudo`:
+
+```console
+xnestdm
+```
+
+The module installs the package and PAM policy, connects the configured host X
+sessions, and creates `/run/wrappers/bin/xnestdm` as a setuid-root NixOS
+security wrapper. The wrapper is generated during system activation and takes
+precedence in users' `PATH`; the package in the immutable Nix store is not made
+setuid. xnestdm drops to the appropriate unprivileged account before starting
+Xephyr or the nested desktop. The GUI and PAM transaction retain effective
+root privileges while xnestdm is running, as they do when it is launched
+through `sudo`.
+
+For safety, the privileged launcher ignores caller-supplied Python, QML, and Qt
+plugin paths and does not allow `--pam-service`; it always uses the module's
+dedicated `xnestdm` PAM service. The module does not install a desktop
+environment.
 
 ## Troubleshooting
 

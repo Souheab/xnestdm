@@ -108,6 +108,16 @@ def test_unprivileged_invoking_account_ignores_spoofed_sudo_uid(monkeypatch) -> 
     assert invoking_account().uid == account.uid
 
 
+def test_setuid_invoking_account_ignores_spoofed_sudo_uid(monkeypatch) -> None:
+    account = current_account()
+    assert account.uid != 0
+    monkeypatch.setenv("SUDO_UID", "0")
+    monkeypatch.setattr("xnestdm.session.os.getuid", lambda: account.uid)
+    monkeypatch.setattr("xnestdm.session.os.geteuid", lambda: 0)
+
+    assert invoking_account().uid == account.uid
+
+
 def test_runtime_directory_uses_owned_run_directory_or_private_temp(
     monkeypatch, tmp_path: Path
 ) -> None:

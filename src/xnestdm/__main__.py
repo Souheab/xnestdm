@@ -24,7 +24,6 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    os.environ["QT_QPA_PLATFORM"] = "xcb"
 
     if not os.environ.get("DISPLAY"):
         print(
@@ -32,6 +31,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    if os.getuid() != os.geteuid() and args.pam_service:
+        print(
+            "--pam-service cannot be used through the privileged NixOS launcher.",
+            file=sys.stderr,
+        )
+        return 2
+
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 
     from PySide6.QtWidgets import QApplication
 

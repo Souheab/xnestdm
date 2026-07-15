@@ -35,6 +35,14 @@
           pythonImportsCheck = [ "xnestdm" ];
 
           makeWrapperArgs = [
+            "--unset PYTHONHOME"
+            "--unset PYTHONPATH"
+            "--unset PYTHONSTARTUP"
+            "--unset QML2_IMPORT_PATH"
+            "--unset QML_IMPORT_PATH"
+            "--unset QT_PLUGIN_PATH"
+            "--unset QT_QPA_PLATFORM_PLUGIN_PATH"
+            "--unset QT_STYLE_OVERRIDE"
             "\${qtWrapperArgs[@]}"
             "--set QT_QPA_PLATFORM xcb"
             "--set XNESTDM_XEPHYR ${pkgs.xorg-server}/bin/Xephyr"
@@ -89,39 +97,6 @@
         }
       );
 
-      nixosModules.default =
-        {
-          config,
-          lib,
-          pkgs,
-          ...
-        }:
-        let
-          cfg = config.programs.xnestdm;
-          sessionData = config.services.displayManager.sessionData;
-          package = self.packages.${pkgs.stdenv.hostPlatform.system}.xnestdm.overrideAttrs (previous: {
-            makeWrapperArgs =
-              (previous.makeWrapperArgs or [ ])
-              ++ lib.optionals (sessionData ? desktops) [
-                "--set XNESTDM_XSESSION_DIRS ${sessionData.desktops}/share/xsessions"
-              ]
-              ++ lib.optionals (sessionData ? wrapper) [
-                "--set XNESTDM_XSESSION_WRAPPER ${sessionData.wrapper}"
-              ];
-          });
-        in
-        {
-          options.programs.xnestdm.enable = lib.mkEnableOption "xnestdm";
-
-          config = lib.mkIf cfg.enable {
-            environment.systemPackages = [
-              package
-            ];
-            security.pam.services.xnestdm = {
-              startSession = true;
-              setLoginUid = false;
-            };
-          };
-        };
+      nixosModules.default = import ./nixos/module.nix { inherit self; };
     };
 }

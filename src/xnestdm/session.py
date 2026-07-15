@@ -501,8 +501,14 @@ class SessionController(QObject):
 
 
 def invoking_account() -> Account:
-    uid_text = os.environ.get("SUDO_UID") if os.geteuid() == 0 else None
-    uid = int(uid_text) if uid_text and uid_text.isdigit() else os.getuid()
+    real_uid = os.getuid()
+    # sudo starts the application with real and effective UID 0. A setuid
+    # launcher keeps the caller's real UID, which is authoritative and cannot
+    # be replaced by a caller-controlled SUDO_UID environment variable.
+    uid_text = (
+        os.environ.get("SUDO_UID") if real_uid == 0 and os.geteuid() == 0 else None
+    )
+    uid = int(uid_text) if uid_text and uid_text.isdigit() else real_uid
     record = pwd.getpwuid(uid)
     return Account(
         username=record.pw_name,

@@ -31,7 +31,8 @@ from .xsessions import XSession, discover_xsessions, preferred_xsession_index
 
 LOG = logging.getLogger(__name__)
 OTHER_USERS_DISABLED = (
-    "Log in as another user is disabled. Start xnestdm with sudo to enable it."
+    "Log in as another user is disabled. Enable the NixOS module or start "
+    "xnestdm with sudo to enable it."
 )
 VIEWPORT_PADDING = 12
 
