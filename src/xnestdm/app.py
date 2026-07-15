@@ -31,7 +31,7 @@ from .xsessions import XSession, discover_xsessions, preferred_xsession_index
 
 LOG = logging.getLogger(__name__)
 OTHER_USERS_DISABLED = (
-    "Log in as another user is disabled. Start Userdesk with sudo to enable it."
+    "Log in as another user is disabled. Start xnestdm with sudo to enable it."
 )
 VIEWPORT_PADDING = 12
 
@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
         self.pending_message = ""
         self.closing = False
 
-        self.setWindowTitle("Userdesk")
+        self.setWindowTitle("xnestdm")
         self.resize(1200, 800)
 
         self.login_page = LoginPage(

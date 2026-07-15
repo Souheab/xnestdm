@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import pamela
 
-from userdesk.auth import Account, PamTransaction, PamWorker, select_pam_service
+from xnestdm.auth import Account, PamTransaction, PamWorker, select_pam_service
 
 
 class FakeHandle:
@@ -40,13 +40,13 @@ def test_authenticate_keeps_handle_and_checks_account(monkeypatch) -> None:
         return handle
 
     account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
-    monkeypatch.setattr("userdesk.auth.pamela.authenticate", authenticate)
+    monkeypatch.setattr("xnestdm.auth.pamela.authenticate", authenticate)
     monkeypatch.setattr(Account, "from_username", lambda username: account)
 
-    transaction = PamTransaction.authenticate("alice", "secret", "userdesk")
+    transaction = PamTransaction.authenticate("alice", "secret", "xnestdm")
 
     assert transaction.handle is handle
-    assert calls["service"] == "userdesk"
+    assert calls["service"] == "xnestdm"
     assert calls["check"] is True
     assert calls["close"] is False
 
@@ -54,14 +54,14 @@ def test_authenticate_keeps_handle_and_checks_account(monkeypatch) -> None:
 def test_open_and_close_use_same_pam_handle(monkeypatch) -> None:
     handle = FakeHandle()
     account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
-    transaction = PamTransaction(handle, account, "userdesk")
+    transaction = PamTransaction(handle, account, "xnestdm")
     calls = SimpleNamespace(setcred=0, ended=0)
     monkeypatch.setattr(
-        "userdesk.auth.pamela.PAM_SETCRED",
+        "xnestdm.auth.pamela.PAM_SETCRED",
         lambda pam_handle, flags: setattr(calls, "setcred", calls.setcred + 1),
     )
     monkeypatch.setattr(
-        "userdesk.auth.pamela.pam_end",
+        "xnestdm.auth.pamela.pam_end",
         lambda pam_handle: setattr(calls, "ended", calls.ended + 1),
     )
 
@@ -82,8 +82,8 @@ def test_login_service_skips_session_hooks(monkeypatch) -> None:
     handle = FakeHandle()
     account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
     transaction = PamTransaction(handle, account, "login")
-    monkeypatch.setattr("userdesk.auth.pamela.PAM_SETCRED", lambda *args: 0)
-    monkeypatch.setattr("userdesk.auth.pamela.pam_end", lambda handle: None)
+    monkeypatch.setattr("xnestdm.auth.pamela.PAM_SETCRED", lambda *args: 0)
+    monkeypatch.setattr("xnestdm.auth.pamela.pam_end", lambda handle: None)
 
     environment = transaction.open(":101", "launcher", "custom", "Custom")
     transaction.close()
@@ -97,11 +97,11 @@ def test_login_service_skips_session_hooks(monkeypatch) -> None:
 def test_account_lookup_failure_ends_pam(monkeypatch) -> None:
     handle = FakeHandle()
     ended: list[object] = []
-    monkeypatch.setattr("userdesk.auth.pamela.authenticate", lambda *a, **k: handle)
+    monkeypatch.setattr("xnestdm.auth.pamela.authenticate", lambda *a, **k: handle)
     monkeypatch.setattr(
         Account, "from_username", lambda username: (_ for _ in ()).throw(KeyError())
     )
-    monkeypatch.setattr("userdesk.auth.pamela.pam_end", ended.append)
+    monkeypatch.setattr("xnestdm.auth.pamela.pam_end", ended.append)
 
     with pytest.raises(KeyError):
         PamTransaction.authenticate("missing", "secret", "login")
@@ -109,10 +109,10 @@ def test_account_lookup_failure_ends_pam(monkeypatch) -> None:
 
 
 def test_pam_service_selection(monkeypatch) -> None:
-    monkeypatch.setattr("userdesk.auth.os.path.exists", lambda path: True)
-    assert select_pam_service(None) == "userdesk"
+    monkeypatch.setattr("xnestdm.auth.os.path.exists", lambda path: True)
+    assert select_pam_service(None) == "xnestdm"
     assert select_pam_service("custom") == "custom"
-    monkeypatch.setattr("userdesk.auth.os.path.exists", lambda path: False)
+    monkeypatch.setattr("xnestdm.auth.os.path.exists", lambda path: False)
     assert select_pam_service(None) == "login"
 
 
@@ -132,7 +132,7 @@ def test_worker_classifies_pam_failures(monkeypatch, error_number, expected) -> 
     outcomes = []
     worker.authentication_finished.connect(outcomes.append)
 
-    worker.authenticate("alice", "bad", "userdesk")
+    worker.authenticate("alice", "bad", "xnestdm")
 
     assert outcomes[0].ok is False
     assert outcomes[0].message == expected

@@ -78,7 +78,7 @@ def xsession_directories(
 ) -> list[Path]:
     directories: list[Path] = []
 
-    configured = environment.get("USERDESK_XSESSION_DIRS", "")
+    configured = environment.get("XNESTDM_XSESSION_DIRS", "")
     directories.extend(Path(item) for item in configured.split(os.pathsep) if item)
 
     if home is None:

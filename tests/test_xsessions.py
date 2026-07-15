@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from userdesk.xsessions import (
+from xnestdm.xsessions import (
     USER_XSESSION,
     discover_xsessions,
     parse_xsession,
@@ -25,7 +25,7 @@ def test_xsession_directories_include_overrides_xdg_and_system_paths(
 ) -> None:
     directories = xsession_directories(
         {
-            "USERDESK_XSESSION_DIRS": "/host/first:/host/second",
+            "XNESTDM_XSESSION_DIRS": "/host/first:/host/second",
             "XDG_DATA_HOME": str(tmp_path / "data-home"),
             "XDG_DATA_DIRS": "/host/share:/other/share",
         },
@@ -90,13 +90,13 @@ def test_discovery_filters_invalid_entries_and_deduplicates_by_precedence(
         "Name=Missing\nExec=/missing\nTryExec=/definitely/missing\n",
     )
     monkeypatch.setattr(
-        "userdesk.xsessions.xsession_directories",
+        "xnestdm.xsessions.xsession_directories",
         lambda environment, home: [preferred, secondary],
     )
 
     sessions = discover_xsessions(
         {
-            "USERDESK_XSESSION_DIRS": f"{preferred}:{secondary}",
+            "XNESTDM_XSESSION_DIRS": f"{preferred}:{secondary}",
             "XDG_DATA_HOME": str(tmp_path / "empty"),
             "XDG_DATA_DIRS": str(tmp_path / "also-empty"),
             "PATH": "/bin",
@@ -113,7 +113,7 @@ def test_discovery_returns_user_fallback_when_catalog_is_empty(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "userdesk.xsessions.xsession_directories",
+        "xnestdm.xsessions.xsession_directories",
         lambda environment, home: [],
     )
     sessions = discover_xsessions(
@@ -141,12 +141,12 @@ def test_preferred_session_matches_host_desktop_name(
         "Name=SADE\nExec=/bin/true\nDesktopNames=none+SADE;\n",
     )
     monkeypatch.setattr(
-        "userdesk.xsessions.xsession_directories",
+        "xnestdm.xsessions.xsession_directories",
         lambda environment, home: [directory],
     )
     sessions = discover_xsessions(
         {
-            "USERDESK_XSESSION_DIRS": str(directory),
+            "XNESTDM_XSESSION_DIRS": str(directory),
             "XDG_DATA_HOME": str(tmp_path / "empty"),
             "XDG_DATA_DIRS": str(tmp_path / "also-empty"),
             "PATH": "/bin",

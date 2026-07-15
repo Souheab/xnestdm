@@ -101,7 +101,7 @@ class PamTransaction:
     ) -> dict[str, str]:
         if self.closed:
             raise RuntimeError("PAM transaction is already closed")
-        self.handle.set_item(pamela.PAM_TTY, f"userdesk/{display}")
+        self.handle.set_item(pamela.PAM_TTY, f"xnestdm/{display}")
         if invoking_user:
             self.handle.set_item(pamela.PAM_RUSER, invoking_user)
 
@@ -226,6 +226,6 @@ class PamWorker(QObject):
 def select_pam_service(override: str | None) -> str:
     if override:
         return override
-    if os.path.exists("/etc/pam.d/userdesk"):
-        return "userdesk"
+    if os.path.exists("/etc/pam.d/xnestdm"):
+        return "xnestdm"
     return "login"

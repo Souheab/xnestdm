@@ -28,7 +28,7 @@ def main() -> int:
 
     if not os.environ.get("DISPLAY"):
         print(
-            "userdesk requires an outer X11 display or XWayland (DISPLAY is unset).",
+            "xnestdm requires an outer X11 display or XWayland (DISPLAY is unset).",
             file=sys.stderr,
         )
         return 2

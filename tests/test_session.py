@@ -4,8 +4,8 @@ import os
 import pwd
 from pathlib import Path
 
-from userdesk.auth import Account
-from userdesk.session import (
+from xnestdm.auth import Account
+from xnestdm.session import (
     Commands,
     OutputBuffer,
     SessionController,
@@ -15,7 +15,7 @@ from userdesk.session import (
     runtime_directory,
     user_session_environment,
 )
-from userdesk.xsessions import XSession
+from xnestdm.xsessions import XSession
 
 
 SESSION = XSession(
@@ -40,8 +40,8 @@ def current_account() -> Account:
 
 
 def test_commands_read_optional_host_session_wrapper(monkeypatch) -> None:
-    monkeypatch.setenv("USERDESK_XEPHYR", "/app/bin/Xephyr")
-    monkeypatch.setenv("USERDESK_XSESSION_WRAPPER", "/host/Xsession --nested")
+    monkeypatch.setenv("XNESTDM_XEPHYR", "/app/bin/Xephyr")
+    monkeypatch.setenv("XNESTDM_XSESSION_WRAPPER", "/host/Xsession --nested")
     commands = Commands.from_environment()
     assert commands.xephyr == "/app/bin/Xephyr"
     assert commands.session_wrapper == ("/host/Xsession", "--nested")
@@ -90,10 +90,10 @@ def test_outer_environment_preserves_x_credentials(monkeypatch) -> None:
 
 def test_credential_arguments_avoid_unprivileged_setgroups(monkeypatch) -> None:
     account = current_account()
-    monkeypatch.setattr("userdesk.session.os.geteuid", lambda: account.uid)
+    monkeypatch.setattr("xnestdm.session.os.geteuid", lambda: account.uid)
     assert credential_arguments(account) == {}
 
-    monkeypatch.setattr("userdesk.session.os.geteuid", lambda: 0)
+    monkeypatch.setattr("xnestdm.session.os.geteuid", lambda: 0)
     assert credential_arguments(account) == {
         "user": account.uid,
         "group": account.gid,
@@ -104,7 +104,7 @@ def test_credential_arguments_avoid_unprivileged_setgroups(monkeypatch) -> None:
 def test_unprivileged_invoking_account_ignores_spoofed_sudo_uid(monkeypatch) -> None:
     account = current_account()
     monkeypatch.setenv("SUDO_UID", "0")
-    monkeypatch.setattr("userdesk.session.os.geteuid", lambda: account.uid)
+    monkeypatch.setattr("xnestdm.session.os.geteuid", lambda: account.uid)
     assert invoking_account().uid == account.uid
 
 
@@ -112,7 +112,7 @@ def test_runtime_directory_uses_owned_run_directory_or_private_temp(
     monkeypatch, tmp_path: Path
 ) -> None:
     account = current_account()
-    monkeypatch.setattr("userdesk.session.Path", lambda value: tmp_path)
+    monkeypatch.setattr("xnestdm.session.Path", lambda value: tmp_path)
     path, owned = runtime_directory(account)
     assert path == tmp_path
     assert owned is False
@@ -142,9 +142,9 @@ def test_selected_session_is_started_through_host_wrapper(
         return FakeProcess()
 
     monkeypatch.setattr(
-        "userdesk.session.runtime_directory", lambda account: (tmp_path, False)
+        "xnestdm.session.runtime_directory", lambda account: (tmp_path, False)
     )
-    monkeypatch.setattr("userdesk.session.subprocess.Popen", launch)
+    monkeypatch.setattr("xnestdm.session.subprocess.Popen", launch)
 
     controller.start_user_session(account, {}, SESSION)
 
@@ -181,7 +181,7 @@ def test_end_session_timeout_forces_session_and_stops_xephyr(qapp, monkeypatch) 
     controller.xephyr = FakeProcess()  # type: ignore[assignment]
     killed = []
     terminated = []
-    monkeypatch.setattr("userdesk.session.time.monotonic", lambda: 2.0)
+    monkeypatch.setattr("xnestdm.session.time.monotonic", lambda: 2.0)
     monkeypatch.setattr(controller, "_kill_process", killed.append)
     monkeypatch.setattr(controller, "_terminate_process", terminated.append)
 

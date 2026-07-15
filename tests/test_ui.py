@@ -5,8 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QResizeEvent
 
-from userdesk.app import DesktopPage, LoginPage, MainWindow
-from userdesk.xsessions import XSession
+from xnestdm.app import DesktopPage, LoginPage, MainWindow
+from xnestdm.xsessions import XSession
 
 
 SESSION = XSession(
@@ -82,7 +82,7 @@ def test_desktop_host_is_padded_and_tracks_page_size(qapp) -> None:
 
 
 def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:
-    window = MainWindow("userdesk", allow_other_users=True)
+    window = MainWindow("xnestdm", allow_other_users=True)
     window.authenticate_requested.disconnect(window.pam_worker.authenticate)
     requests: list[tuple[str, str, str]] = []
     window.authenticate_requested.connect(
@@ -96,7 +96,7 @@ def test_main_window_clears_password_when_auth_is_dispatched(qapp) -> None:
 
     assert window.login_page.password.text() == ""
     assert not window.login_page.login_button.isEnabled()
-    assert requests == [("alice", "secret", "userdesk")]
+    assert requests == [("alice", "secret", "xnestdm")]
     assert window.toolbar.isHidden()
     window.close()
 
@@ -117,7 +117,7 @@ def test_unprivileged_login_page_only_allows_current_user(qapp) -> None:
 
 
 def test_current_user_path_skips_pam(qapp, monkeypatch) -> None:
-    window = MainWindow("userdesk", allow_other_users=False)
+    window = MainWindow("xnestdm", allow_other_users=False)
     starts = []
     monkeypatch.setattr(
         window.session_controller,

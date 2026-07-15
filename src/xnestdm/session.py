@@ -123,13 +123,13 @@ class Commands:
 
     @classmethod
     def from_environment(cls) -> "Commands":
-        configured_wrapper = os.environ.get("USERDESK_XSESSION_WRAPPER", "")
+        configured_wrapper = os.environ.get("XNESTDM_XSESSION_WRAPPER", "")
         try:
             session_wrapper = tuple(shlex.split(configured_wrapper, posix=True))
         except ValueError:
             session_wrapper = ()
         return cls(
-            xephyr=_command("USERDESK_XEPHYR", "Xephyr"),
+            xephyr=_command("XNESTDM_XEPHYR", "Xephyr"),
             session_wrapper=session_wrapper,
         )
 
@@ -162,7 +162,7 @@ class OutputBuffer:
             finally:
                 stream.close()
 
-        threading.Thread(target=read, name=f"userdesk-{label}", daemon=True).start()
+        threading.Thread(target=read, name=f"xnestdm-{label}", daemon=True).start()
 
     def tail(self, count: int = 12) -> str:
         with self._lock:
@@ -247,9 +247,9 @@ class SessionController(QObject):
             "tcp",
             "-ac",
             "-name",
-            "userdesk",
+            "xnestdm",
             "-title",
-            "Userdesk",
+            "xnestdm",
         ]
         identity = invoking_account()
         try:
@@ -605,7 +605,7 @@ def runtime_directory(account: Account) -> tuple[Path, bool]:
     standard = Path(f"/run/user/{account.uid}")
     if _owned_directory(standard, account.uid):
         return standard, False
-    created = Path(tempfile.mkdtemp(prefix=f"userdesk-{account.uid}-", dir="/tmp"))
+    created = Path(tempfile.mkdtemp(prefix=f"xnestdm-{account.uid}-", dir="/tmp"))
     os.chown(created, account.uid, account.gid)
     os.chmod(created, 0o700)
     return created, True

@@ -1,11 +1,11 @@
-# Userdesk
+# xnestdm
 
-Userdesk is a small nested X11 display manager. It embeds a Xephyr X server in
+xnestdm is a small nested X11 display manager. It embeds a Xephyr X server in
 a normal Qt window, discovers the X sessions supplied by the host, and starts
 the selected session as the current user or as a PAM-authenticated local user.
 The Qt login page and session toolbar use the platform's default Qt style.
 
-Userdesk does not bundle a desktop environment. Standard host X session entries
+xnestdm does not bundle a desktop environment. Standard host X session entries
 are discovered from `xsessions` directories under `XDG_DATA_HOME` and
 `XDG_DATA_DIRS`, with `/usr/local/share/xsessions` and `/usr/share/xsessions` as
 fallbacks. The NixOS module also exposes the sessions configured through
@@ -50,7 +50,7 @@ sudo --preserve-env=DISPLAY,XAUTHORITY,XDG_DATA_DIRS nix run .
 ```
 
 The current-user button still refers to the original `sudo` invoker rather than
-root. When the NixOS module is enabled, its installed `userdesk` command already
+root. When the NixOS module is enabled, its installed `xnestdm` command already
 knows the configured host session directory and wrapper, so only the outer X
 credentials need to survive `sudo`.
 
@@ -61,11 +61,11 @@ If `XAUTHORITY` is normally unset but the display cookie is stored in
 XAUTHORITY="$HOME/.Xauthority" sudo --preserve-env=DISPLAY,XAUTHORITY,XDG_DATA_DIRS nix run .
 ```
 
-Userdesk forces Qt's `xcb` backend. On a Wayland desktop, `DISPLAY` must point to
+xnestdm forces Qt's `xcb` backend. On a Wayland desktop, `DISPLAY` must point to
 XWayland. Native Wayland sessions are not listed or supported inside Xephyr.
 
-When login as another user is enabled, Userdesk uses the `userdesk` PAM service
-when `/etc/pam.d/userdesk` exists and otherwise falls back to `login`. Override
+When login as another user is enabled, xnestdm uses the `xnestdm` PAM service
+when `/etc/pam.d/xnestdm` exists and otherwise falls back to `login`. Override
 this for a host-specific policy with:
 
 ```console
@@ -76,33 +76,33 @@ The standalone `login` fallback performs PAM authentication, account checks,
 and credential setup, but intentionally skips that service's session hooks.
 Traditional `login` policies commonly require `pam_loginuid`, which cannot
 replace the audit login ID inherited through `sudo`. Enabling the NixOS module
-provides the dedicated `userdesk` policy and full PAM open/close session hooks.
+provides the dedicated `xnestdm` policy and full PAM open/close session hooks.
 
 Add `--verbose` after `--` to include Xephyr and nested-session diagnostics on
 standard error.
 
 ### Session discovery overrides
 
-`USERDESK_XSESSION_DIRS` accepts a colon-separated list of additional host
-`xsessions` directories. `USERDESK_XSESSION_WRAPPER` accepts an optional host
+`XNESTDM_XSESSION_DIRS` accepts a colon-separated list of additional host
+`xsessions` directories. `XNESTDM_XSESSION_WRAPPER` accepts an optional host
 session wrapper command that is placed before the selected session command.
 These are primarily integration hooks for display-manager configuration; they
-do not add desktop packages to Userdesk.
+do not add desktop packages to xnestdm.
 
 ## NixOS module
 
-The flake exports a module that installs Userdesk, connects it to the host's
+The flake exports a module that installs xnestdm, connects it to the host's
 configured X session catalog and wrapper, and creates a dedicated PAM service:
 
 ```nix
 {
-  inputs.userdesk.url = "path:/path/to/userdesk";
+  inputs.xnestdm.url = "path:/path/to/xnestdm";
 
-  outputs = { nixpkgs, userdesk, ... }: {
+  outputs = { nixpkgs, xnestdm, ... }: {
     nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
       modules = [
-        userdesk.nixosModules.default
-        ({ ... }: { programs.userdesk.enable = true; })
+        xnestdm.nixosModules.default
+        ({ ... }: { programs.xnestdm.enable = true; })
       ];
     };
   };
@@ -110,7 +110,7 @@ configured X session catalog and wrapper, and creates a dedicated PAM service:
 ```
 
 The module does not install a desktop environment or a setuid GUI. Start the
-installed `userdesk` command normally for a current-user session, or through
+installed `xnestdm` command normally for a current-user session, or through
 `sudo` to enable switching users.
 
 ## Troubleshooting
@@ -120,7 +120,7 @@ installed `userdesk` command normally for a current-user session, or through
   user X session script.
 - A session entry with a missing `TryExec` target is intentionally hidden.
 - Desktop startup, D-Bus, profile loading, and logout behavior come from the
-  host's session entry and wrapper. Userdesk only launches and supervises them.
+  host's session entry and wrapper. xnestdm only launches and supervises them.
 - **End Session** sends the nested session process group a graceful termination
   request, then forces cleanup if it does not exit. Logging out inside the
   desktop is still the preferred desktop-specific path.

@@ -11,10 +11,10 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      mkUserdesk =
+      mkXnestdm =
         pkgs:
         pkgs.python3Packages.buildPythonApplication {
-          pname = "userdesk";
+          pname = "xnestdm";
           version = "0.1.0";
           pyproject = true;
           src = self;
@@ -32,39 +32,39 @@
           preCheck = ''
             export QT_QPA_PLATFORM=offscreen
           '';
-          pythonImportsCheck = [ "userdesk" ];
+          pythonImportsCheck = [ "xnestdm" ];
 
           makeWrapperArgs = [
             "\${qtWrapperArgs[@]}"
             "--set QT_QPA_PLATFORM xcb"
-            "--set USERDESK_XEPHYR ${pkgs.xorg-server}/bin/Xephyr"
+            "--set XNESTDM_XEPHYR ${pkgs.xorg-server}/bin/Xephyr"
           ];
 
           meta = {
             description = "Run host X11 sessions in embedded Xephyr";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "userdesk";
+            mainProgram = "xnestdm";
             platforms = pkgs.lib.platforms.linux;
           };
         };
     in
     {
       packages = forAllSystems (system: {
-        userdesk = mkUserdesk nixpkgs.legacyPackages.${system};
-        default = self.packages.${system}.userdesk;
+        xnestdm = mkXnestdm nixpkgs.legacyPackages.${system};
+        default = self.packages.${system}.xnestdm;
       });
 
       apps = forAllSystems (system: {
-        userdesk = {
+        xnestdm = {
           type = "app";
-          program = "${self.packages.${system}.userdesk}/bin/userdesk";
+          program = "${self.packages.${system}.xnestdm}/bin/xnestdm";
           meta.description = "Run host X11 sessions in embedded Xephyr";
         };
-        default = self.apps.${system}.userdesk;
+        default = self.apps.${system}.xnestdm;
       });
 
       checks = forAllSystems (system: {
-        userdesk = self.packages.${system}.userdesk;
+        xnestdm = self.packages.${system}.xnestdm;
       });
 
       devShells = forAllSystems (
@@ -97,27 +97,27 @@
           ...
         }:
         let
-          cfg = config.programs.userdesk;
+          cfg = config.programs.xnestdm;
           sessionData = config.services.displayManager.sessionData;
-          package = self.packages.${pkgs.stdenv.hostPlatform.system}.userdesk.overrideAttrs (previous: {
+          package = self.packages.${pkgs.stdenv.hostPlatform.system}.xnestdm.overrideAttrs (previous: {
             makeWrapperArgs =
               (previous.makeWrapperArgs or [ ])
               ++ lib.optionals (sessionData ? desktops) [
-                "--set USERDESK_XSESSION_DIRS ${sessionData.desktops}/share/xsessions"
+                "--set XNESTDM_XSESSION_DIRS ${sessionData.desktops}/share/xsessions"
               ]
               ++ lib.optionals (sessionData ? wrapper) [
-                "--set USERDESK_XSESSION_WRAPPER ${sessionData.wrapper}"
+                "--set XNESTDM_XSESSION_WRAPPER ${sessionData.wrapper}"
               ];
           });
         in
         {
-          options.programs.userdesk.enable = lib.mkEnableOption "Userdesk";
+          options.programs.xnestdm.enable = lib.mkEnableOption "xnestdm";
 
           config = lib.mkIf cfg.enable {
             environment.systemPackages = [
               package
             ];
-            security.pam.services.userdesk = {
+            security.pam.services.xnestdm = {
               startSession = true;
               setLoginUid = false;
             };
