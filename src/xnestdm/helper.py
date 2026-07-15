@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,19 @@ DISPLAY_PATTERN = re.compile(r"^:[0-9]+(?:\.[0-9]+)?$")
 PR_SET_PDEATHSIG = 1
 
 
+@dataclass
+class ManagedSession:
+    tab_id: int
+    transaction: PamTransaction | None = None
+    process: subprocess.Popen[bytes] | None = None
+    runtime_directory: Path | None = None
+    owns_runtime_directory: bool = False
+    output: deque[str] = field(default_factory=lambda: deque(maxlen=250))
+    output_buffer: bytes = b""
+    stop_requested: bool = False
+    stop_deadline: float = 0.0
+
+
 class HelperServer:
     def __init__(
         self,
@@ -45,16 +59,9 @@ class HelperServer:
         self.caller = caller
         self.pam_service = pam_service
         self.session_wrapper = session_wrapper
-        self.transaction: PamTransaction | None = None
-        self.process: subprocess.Popen[bytes] | None = None
-        self.runtime_directory: Path | None = None
-        self.owns_runtime_directory = False
-        self.output = deque(maxlen=250)
-        self.output_buffer = b""
+        self.sessions: dict[int, ManagedSession] = {}
         self.request_buffer = b""
         self.running = True
-        self.stop_requested = False
-        self.stop_deadline = 0.0
 
     def run(self) -> int:
         self._send(
@@ -68,8 +75,12 @@ class HelperServer:
         try:
             while self.running:
                 readers: list[Any] = [self.connection]
-                if self.process is not None and self.process.stdout is not None:
-                    readers.append(self.process.stdout)
+                readers.extend(
+                    managed.process.stdout
+                    for managed in self.sessions.values()
+                    if managed.process is not None
+                    and managed.process.stdout is not None
+                )
                 ready, _, _ = select.select(readers, [], [], 0.2)
                 for stream in ready:
                     if stream is self.connection:
@@ -77,8 +88,10 @@ class HelperServer:
                             self.running = False
                             break
                     else:
-                        self._read_session_output()
-                self._poll_session()
+                        managed = self._session_for_stream(stream)
+                        if managed is not None:
+                            self._read_session_output(managed)
+                self._poll_sessions()
         finally:
             self._cleanup()
             self.connection.close()
@@ -131,15 +144,20 @@ class HelperServer:
     def _authenticate(self, request_id: int, request: dict[str, Any]) -> None:
         self._expect_keys(
             request,
-            {"protocol", "id", "op", "username", "password"},
+            {"protocol", "id", "op", "tab_id", "username", "password"},
         )
-        if self.process is not None:
+        tab_id = _tab_id(request.get("tab_id"))
+        existing = self.sessions.get(tab_id)
+        if existing is not None and existing.process is not None:
             raise ProtocolError("A nested session is already running")
         username = _bounded_string(request.get("username"), "username", 256)
         password = _bounded_string(request.get("password"), "password", 4096)
-        self._close_transaction()
+        if existing is not None:
+            self._cleanup_session(existing)
+        managed = ManagedSession(tab_id)
+        self.sessions[tab_id] = managed
         try:
-            self.transaction = PamTransaction.authenticate(
+            managed.transaction = PamTransaction.authenticate(
                 username,
                 password,
                 self.pam_service,
@@ -150,22 +168,31 @@ class HelperServer:
                 if isinstance(exc, pamela.PAMError) and exc.errno in EXPIRED_CODES
                 else "Authentication failed"
             )
+            self.sessions.pop(tab_id, None)
             self._respond(request_id, False, message=message)
         except Exception:
             LOG.exception("PAM authentication failed unexpectedly")
+            self.sessions.pop(tab_id, None)
             self._respond(request_id, False, message="Authentication failed")
         else:
+            if managed.transaction is None:
+                raise RuntimeError("PAM authentication returned no transaction")
             self._respond(
                 request_id,
                 True,
-                account=self.transaction.account.to_mapping(),
+                account=managed.transaction.account.to_mapping(),
             )
 
     def _start_session(self, request_id: int, request: dict[str, Any]) -> None:
-        self._expect_keys(request, {"protocol", "id", "op", "display", "session"})
-        if self.transaction is None:
+        self._expect_keys(
+            request,
+            {"protocol", "id", "op", "tab_id", "display", "session"},
+        )
+        tab_id = _tab_id(request.get("tab_id"))
+        managed = self.sessions.get(tab_id)
+        if managed is None or managed.transaction is None:
             raise ProtocolError("No authenticated PAM transaction")
-        if self.process is not None:
+        if managed.process is not None:
             raise ProtocolError("A nested session is already running")
         display = _bounded_string(request.get("display"), "display", 64)
         if not DISPLAY_PATTERN.fullmatch(display):
@@ -188,7 +215,7 @@ class HelperServer:
         current_desktop = _bounded_string(
             session.get("current_desktop"), "desktop name", 512
         )
-        account = self.transaction.account
+        account = managed.transaction.account
         user_fallback = session.get("user_fallback")
         if not isinstance(user_fallback, bool):
             raise ProtocolError("Invalid user-session fallback flag")
@@ -199,20 +226,21 @@ class HelperServer:
         )
         process: subprocess.Popen[bytes] | None = None
         try:
-            pam_environment = self.transaction.open(
+            pam_environment = managed.transaction.open(
                 display,
                 self.caller.username,
                 session_id,
                 current_desktop,
             )
-            self.runtime_directory, self.owns_runtime_directory = runtime_directory(
-                account
-            )
+            (
+                managed.runtime_directory,
+                managed.owns_runtime_directory,
+            ) = runtime_directory(account)
             environment = user_session_environment(
                 account,
                 display,
                 pam_environment,
-                self.runtime_directory,
+                managed.runtime_directory,
                 session_id,
                 current_desktop,
             )
@@ -233,80 +261,100 @@ class HelperServer:
             )
             if process.stdout is not None:
                 os.set_blocking(process.stdout.fileno(), False)
-            self.process = process
-            self.output.clear()
-            self.output_buffer = b""
-            self.stop_requested = False
-            self.stop_deadline = 0.0
+            managed.process = process
+            managed.output.clear()
+            managed.output_buffer = b""
+            managed.stop_requested = False
+            managed.stop_deadline = 0.0
         except Exception as exc:
             LOG.exception("Could not start nested session")
             if process is not None:
                 _stop_process_blocking(process)
                 if process.stdout is not None:
                     process.stdout.close()
-            self.process = None
-            self._remove_runtime_directory()
-            self._close_transaction()
+            managed.process = None
+            self._cleanup_session(managed)
+            self.sessions.pop(tab_id, None)
             self._respond(request_id, False, message=f"Could not start {name}: {exc}")
             return
         self._respond(request_id, True)
 
     def _stop_session(self, request_id: int, request: dict[str, Any]) -> None:
-        self._expect_keys(request, {"protocol", "id", "op"})
+        self._expect_keys(request, {"protocol", "id", "op", "tab_id"})
+        tab_id = _tab_id(request.get("tab_id"))
+        managed = self.sessions.get(tab_id)
         self._respond(request_id, True)
-        if self.process is None:
-            had_transaction = self.transaction is not None
-            self._close_transaction()
-            self._remove_runtime_directory()
-            if had_transaction:
-                self._send_session_finished(0, expected=True)
+        if managed is None:
             return
-        if not self.stop_requested:
-            self.stop_requested = True
-            self.stop_deadline = time.monotonic() + 5.0
-            _signal_process(self.process, signal.SIGTERM)
+        if managed.process is None:
+            had_transaction = managed.transaction is not None
+            self._cleanup_session(managed)
+            self.sessions.pop(tab_id, None)
+            if had_transaction:
+                self._send_session_finished(managed, 0, expected=True)
+            return
+        if not managed.stop_requested:
+            managed.stop_requested = True
+            managed.stop_deadline = time.monotonic() + 5.0
+            _signal_process(managed.process, signal.SIGTERM)
 
-    def _read_session_output(self) -> None:
-        if self.process is None or self.process.stdout is None:
+    def _session_for_stream(self, stream: Any) -> ManagedSession | None:
+        for managed in self.sessions.values():
+            if managed.process is not None and managed.process.stdout is stream:
+                return managed
+        return None
+
+    def _read_session_output(self, managed: ManagedSession) -> None:
+        if managed.process is None or managed.process.stdout is None:
             return
         try:
-            chunk = os.read(self.process.stdout.fileno(), 8192)
+            chunk = os.read(managed.process.stdout.fileno(), 8192)
         except BlockingIOError:
             return
         if not chunk:
             return
-        self.output_buffer += chunk
-        while b"\n" in self.output_buffer:
-            raw, _, self.output_buffer = self.output_buffer.partition(b"\n")
+        managed.output_buffer += chunk
+        while b"\n" in managed.output_buffer:
+            raw, _, managed.output_buffer = managed.output_buffer.partition(b"\n")
             line = raw.decode("utf-8", errors="replace").rstrip()
             if line:
-                self.output.append(line)
-                LOG.debug("session: %s", line)
+                managed.output.append(line)
+                LOG.debug("session %d: %s", managed.tab_id, line)
 
-    def _poll_session(self) -> None:
-        if self.process is None:
+    def _poll_sessions(self) -> None:
+        for managed in tuple(self.sessions.values()):
+            self._poll_session(managed)
+
+    def _poll_session(self, managed: ManagedSession) -> None:
+        if managed.process is None:
             return
-        code = self.process.poll()
+        code = managed.process.poll()
         if code is None:
-            if self.stop_requested and time.monotonic() >= self.stop_deadline:
-                _signal_process(self.process, signal.SIGKILL)
-                self.stop_deadline = float("inf")
+            if (
+                managed.stop_requested
+                and time.monotonic() >= managed.stop_deadline
+            ):
+                _signal_process(managed.process, signal.SIGKILL)
+                managed.stop_deadline = float("inf")
             return
-        self._read_session_output()
-        if self.output_buffer:
-            line = self.output_buffer.decode("utf-8", errors="replace").rstrip()
+        self._read_session_output(managed)
+        if managed.output_buffer:
+            line = managed.output_buffer.decode("utf-8", errors="replace").rstrip()
             if line:
-                self.output.append(line)
-            self.output_buffer = b""
-        expected = self.stop_requested or code == 0
-        if self.process.stdout is not None:
-            self.process.stdout.close()
-        self.process = None
-        self._close_transaction()
-        self._remove_runtime_directory()
-        self._send_session_finished(code, expected)
+                managed.output.append(line)
+            managed.output_buffer = b""
+        expected = managed.stop_requested or code == 0
+        if managed.process.stdout is not None:
+            managed.process.stdout.close()
+        managed.process = None
+        self._close_transaction(managed)
+        self._remove_runtime_directory(managed)
+        self.sessions.pop(managed.tab_id, None)
+        self._send_session_finished(managed, code, expected)
 
-    def _send_session_finished(self, code: int, expected: bool) -> None:
+    def _send_session_finished(
+        self, managed: ManagedSession, code: int, expected: bool
+    ) -> None:
         message = (
             ""
             if expected
@@ -316,12 +364,13 @@ class HelperServer:
             {
                 "protocol": PROTOCOL_VERSION,
                 "event": "session_finished",
+                "tab_id": managed.tab_id,
                 "status": code,
                 "message": message,
-                "diagnostics": "\n".join(self.output),
+                "diagnostics": "\n".join(managed.output),
             }
         )
-        self.output.clear()
+        managed.output.clear()
 
     def _respond(
         self,
@@ -350,8 +399,8 @@ class HelperServer:
         if set(request) != expected:
             raise ProtocolError("Invalid fields for helper operation")
 
-    def _close_transaction(self) -> None:
-        transaction, self.transaction = self.transaction, None
+    def _close_transaction(self, managed: ManagedSession) -> None:
+        transaction, managed.transaction = managed.transaction, None
         if transaction is None:
             return
         try:
@@ -359,24 +408,32 @@ class HelperServer:
         except Exception:
             LOG.exception("PAM cleanup failed")
 
-    def _remove_runtime_directory(self) -> None:
-        path, owned = self.runtime_directory, self.owns_runtime_directory
-        self.runtime_directory = None
-        self.owns_runtime_directory = False
+    def _remove_runtime_directory(self, managed: ManagedSession) -> None:
+        path, owned = (
+            managed.runtime_directory,
+            managed.owns_runtime_directory,
+        )
+        managed.runtime_directory = None
+        managed.owns_runtime_directory = False
         if path is not None and owned:
             try:
                 shutil.rmtree(path)
             except OSError:
                 LOG.exception("Could not remove temporary runtime directory")
 
+    def _cleanup_session(self, managed: ManagedSession) -> None:
+        if managed.process is not None:
+            _stop_process_blocking(managed.process)
+        if managed.process is not None and managed.process.stdout is not None:
+            managed.process.stdout.close()
+        managed.process = None
+        self._close_transaction(managed)
+        self._remove_runtime_directory(managed)
+
     def _cleanup(self) -> None:
-        if self.process is not None:
-            _stop_process_blocking(self.process)
-        if self.process is not None and self.process.stdout is not None:
-            self.process.stdout.close()
-        self.process = None
-        self._close_transaction()
-        self._remove_runtime_directory()
+        for managed in tuple(self.sessions.values()):
+            self._cleanup_session(managed)
+        self.sessions.clear()
 
 
 def user_session_environment(
@@ -459,6 +516,12 @@ def _owned_directory(path: Path, uid: int) -> bool:
 def _bounded_string(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str) or not value or len(value) > limit or "\0" in value:
         raise ProtocolError(f"Invalid {label}")
+    return value
+
+
+def _tab_id(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ProtocolError("Invalid session tab id")
     return value
 
 

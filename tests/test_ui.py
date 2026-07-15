@@ -28,26 +28,26 @@ SESSION = XSession(
 
 
 class FakeHelper(QObject):
-    authentication_finished = Signal(object)
-    session_start_finished = Signal(object)
-    session_finished = Signal(str)
+    authentication_finished = Signal(int, object)
+    session_start_finished = Signal(int, object)
+    session_finished = Signal(int, str)
     failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.auth_requests = []
         self.session_requests = []
-        self.stop_requests = 0
+        self.stop_requests: list[int] = []
         self.shutdown_requests = 0
 
-    def authenticate(self, username, password) -> None:
-        self.auth_requests.append((username, password))
+    def authenticate(self, tab_id, username, password) -> None:
+        self.auth_requests.append((tab_id, username, password))
 
-    def start_session(self, display, session) -> None:
-        self.session_requests.append((display, session))
+    def start_session(self, tab_id, display, session) -> None:
+        self.session_requests.append((tab_id, display, session))
 
-    def stop_session(self) -> None:
-        self.stop_requests += 1
+    def stop_session(self, tab_id) -> None:
+        self.stop_requests.append(tab_id)
 
     def shutdown(self) -> None:
         self.shutdown_requests += 1
@@ -143,9 +143,10 @@ def test_main_window_clears_password_when_auth_is_dispatched(qapp, settings) -> 
 
     window._authenticate("alice", "secret", SESSION)
 
+    assert window.active_tab is not None
     assert window.login_page.password.text() == ""
     assert not window.login_page.login_button.isEnabled()
-    assert helper.auth_requests == [("alice", "secret")]
+    assert helper.auth_requests == [(window.active_tab.tab_id, "alice", "secret")]
     assert window.toolbar.isHidden()
     window.close()
 
@@ -209,18 +210,22 @@ def test_alternate_user_routes_session_through_helper(
     )
 
     window._authenticate("alice", "secret", SESSION)
-    helper.authentication_finished.emit(AuthenticationOutcome(True, account))
+    assert window.active_tab is not None
+    tab_id = window.active_tab.tab_id
+    helper.authentication_finished.emit(
+        tab_id, AuthenticationOutcome(True, account)
+    )
 
     assert starts == [account]
     assert window.helper_transaction_pending
 
     window._on_xephyr_ready(":9")
-    assert helper.session_requests == [(":9", SESSION)]
+    assert helper.session_requests == [(tab_id, ":9", SESSION)]
 
     monkeypatch.setattr(
         window.session_controller, "mark_remote_session_started", lambda: None
     )
-    helper.session_start_finished.emit(SessionStartOutcome(True))
+    helper.session_start_finished.emit(tab_id, SessionStartOutcome(True))
     assert window.remote_session_active
     window.close()
 
@@ -304,4 +309,173 @@ def test_clipboard_failure_disables_only_sharing(qapp, monkeypatch, settings) ->
     assert settings.value(CLIPBOARD_SHARING_SETTING, type=bool) is False
     assert warnings == ["The clipboard helper crashed"]
     assert stopped_sessions == []
+    window.close()
+
+
+def test_window_creates_independent_session_tabs(qapp, settings) -> None:
+    window = MainWindow(settings=settings)
+    first = window.active_tab
+    assert first is not None
+    first.login_page.username.setText("first")
+
+    window.add_tab_button.click()
+    second = window.active_tab
+
+    assert second is not None
+    assert second is not first
+    assert second.tab_id > first.tab_id
+    assert window.tabs.count() == 2
+    assert window.tabs.tabText(0) == "New Session"
+    assert first.login_page.username.text() == "first"
+    assert second.login_page.username.text() == ""
+    window.close()
+
+
+def test_current_user_sessions_run_independently_across_tabs(
+    qapp, monkeypatch, settings
+) -> None:
+    window = MainWindow(settings=settings)
+    first = window.active_tab
+    assert first is not None
+    first_starts = []
+    monkeypatch.setattr(
+        first.session_controller,
+        "start_xephyr",
+        lambda host, account: first_starts.append(account),
+    )
+    first._use_current_user(SESSION)
+
+    second = window._add_tab()
+    second_starts = []
+    monkeypatch.setattr(
+        second.session_controller,
+        "start_xephyr",
+        lambda host, account: second_starts.append(account),
+    )
+    second._use_current_user(SESSION)
+
+    assert first_starts == [window.current_account]
+    assert second_starts == [window.current_account]
+    assert first.account == window.current_account
+    assert second.account == window.current_account
+    assert window.tabs.tabText(window.tabs.indexOf(first)).endswith("Test Session")
+    assert window.tabs.tabText(window.tabs.indexOf(second)).endswith("Test Session")
+    window.close()
+
+
+def test_clipboard_sharing_follows_only_the_active_tab(
+    qapp, monkeypatch, settings
+) -> None:
+    bridge = FakeClipboardBridge()
+    window = MainWindow(
+        settings=settings,
+        clipboard_bridge=bridge,  # type: ignore[arg-type]
+    )
+    first = window.active_tab
+    assert first is not None
+    monkeypatch.setattr(first.session_controller, "start_xephyr", lambda *_: None)
+    monkeypatch.setattr(first.session_controller, "start_user_session", lambda *_: None)
+    first._use_current_user(SESSION)
+    first._on_xephyr_ready(":21")
+    window.clipboard_action.setChecked(True)
+
+    second = window._add_tab()
+    monkeypatch.setattr(second.session_controller, "start_xephyr", lambda *_: None)
+    monkeypatch.setattr(
+        second.session_controller, "start_user_session", lambda *_: None
+    )
+    second._use_current_user(SESSION)
+    second._on_xephyr_ready(":22")
+    window.tabs.setCurrentWidget(first)
+
+    assert bridge.starts == [":21", ":22", ":21"]
+    assert window._clipboard_display == ":21"
+    window.close()
+
+
+def test_closing_last_running_tab_confirms_and_leaves_fresh_tab(
+    qapp, monkeypatch, settings
+) -> None:
+    window = MainWindow(settings=settings)
+    tab = window.active_tab
+    assert tab is not None
+    monkeypatch.setattr(tab.session_controller, "start_xephyr", lambda *_: None)
+    tab._use_current_user(SESSION)
+    shutdowns = []
+    monkeypatch.setattr(tab, "shutdown", lambda: shutdowns.append(tab.tab_id))
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+
+    window._close_tab(0)
+
+    assert shutdowns == [tab.tab_id]
+    assert window.tabs.count() == 1
+    assert window.active_tab is not tab
+    assert window.tabs.tabText(0) == "New Session"
+    window.close()
+
+
+def test_closing_tab_during_authentication_requests_helper_cleanup(
+    qapp, monkeypatch, settings
+) -> None:
+    helper = FakeHelper()
+    window = MainWindow(helper, settings=settings)  # type: ignore[arg-type]
+    tab = window.active_tab
+    assert tab is not None
+    tab._authenticate("alice", "secret", SESSION)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+
+    window._close_tab(0)
+
+    assert helper.stop_requests == [tab.tab_id]
+    assert window.tabs.count() == 1
+    assert window.active_tab is not tab
+    window.close()
+
+
+def test_helper_failure_stops_privileged_tabs_but_keeps_current_user_tabs(
+    qapp, monkeypatch, settings
+) -> None:
+    helper = FakeHelper()
+    window = MainWindow(helper, settings=settings)  # type: ignore[arg-type]
+    current = window.active_tab
+    assert current is not None
+    monkeypatch.setattr(current.session_controller, "start_xephyr", lambda *_: None)
+    current._use_current_user(SESSION)
+    current.session_controller._state = "running"
+    current_stops = []
+    monkeypatch.setattr(current.session_controller, "stop", current_stops.append)
+    monkeypatch.setattr(current.session_controller, "shutdown_blocking", lambda: None)
+
+    privileged = window._add_tab()
+    monkeypatch.setattr(
+        privileged.session_controller, "start_xephyr", lambda *_: None
+    )
+    privileged._authenticate("alice", "secret", SESSION)
+    account = Account("alice", 1001, 1001, "/home/alice", "/bin/sh", (1001,))
+    helper.authentication_finished.emit(
+        privileged.tab_id, AuthenticationOutcome(True, account)
+    )
+    privileged.session_controller._state = "running"
+    privileged_stops = []
+    monkeypatch.setattr(
+        privileged.session_controller, "stop", privileged_stops.append
+    )
+    monkeypatch.setattr(
+        privileged.session_controller, "shutdown_blocking", lambda: None
+    )
+
+    helper.failed.emit("Helper failed")
+
+    assert current_stops == []
+    assert privileged_stops == ["Helper failed"]
+    assert not current.login_page.allow_other_users
+    assert not privileged.login_page.allow_other_users
     window.close()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAX_MESSAGE_SIZE = 64 * 1024
 
 

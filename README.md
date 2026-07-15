@@ -83,6 +83,20 @@ provides the dedicated `xnestdm` policy and full PAM open/close session hooks.
 Add `--verbose` after `--` to include Xephyr and nested-session diagnostics on
 standard error.
 
+### Multiple sessions
+
+xnestdm can keep multiple nested sessions running in one window. Use the **+**
+button beside the tab bar to open another login tab. Each tab has its own
+Xephyr server, login form, selected desktop, and session lifecycle, so current-
+user and authenticated local-user sessions can run concurrently. Closing a tab
+with a starting or running session asks for confirmation and ends only that
+session. When a desktop logs out or **End Session** is used, its tab returns to
+the login form.
+
+The session toolbar always controls the selected tab. Closing the application
+ends every running session, and a new launch starts with one blank tab rather
+than restoring the previous tabs.
+
 ### Clipboard sharing
 
 During a nested session, open the settings cog in the top toolbar and enable
@@ -94,7 +108,9 @@ future synchronization without clearing either clipboard.
 Clipboard sharing is bidirectional and deliberately opt-in because guest
 applications can read host clipboard text while it is enabled. Images, files,
 rich text, custom clipboard formats, and the X11 primary selection are not
-shared.
+shared. With multiple live sessions, sharing follows only the selected tab;
+switching tabs disconnects the previous guest and connects the newly selected
+guest.
 
 ### Session discovery overrides
 
@@ -162,9 +178,9 @@ module does not install a desktop environment.
   `/run/wrappers/bin/xnestdm-helper` exists.
 - Desktop startup, D-Bus, profile loading, and logout behavior come from the
   host's session entry and wrapper. xnestdm only launches and supervises them.
-- **End Session** sends the nested session process group a graceful termination
-  request, then forces cleanup if it does not exit. Logging out inside the
-  desktop is still the preferred desktop-specific path.
+- **End Session** sends the selected tab's nested session process group a
+  graceful termination request, then forces cleanup if it does not exit.
+  Logging out inside the desktop is still the preferred desktop-specific path.
 
 ## Development and checks
 
