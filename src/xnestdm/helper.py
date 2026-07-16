@@ -307,11 +307,14 @@ class HelperServer:
     def _read_session_output(self, managed: ManagedSession) -> None:
         if managed.process is None or managed.process.stdout is None:
             return
+        stream = managed.process.stdout
         try:
-            chunk = os.read(managed.process.stdout.fileno(), 8192)
+            chunk = os.read(stream.fileno(), 8192)
         except BlockingIOError:
             return
         if not chunk:
+            stream.close()
+            managed.process.stdout = None
             return
         managed.output_buffer += chunk
         while b"\n" in managed.output_buffer:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pamela
@@ -198,6 +199,21 @@ def test_helper_runs_and_stops_sessions_independently(
     assert helper.sessions[11].stop_requested
     assert not helper.sessions[12].stop_requested
     assert signaled == [(first_process, 15)]
+
+
+def test_helper_stops_monitoring_session_output_after_eof() -> None:
+    helper = server()
+    process = FakeProcess()
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    process.stdout = stream
+    managed = ManagedSession(13, process=process)  # type: ignore[arg-type]
+
+    helper._read_session_output(managed)
+
+    assert stream.closed
+    assert process.stdout is None
 
 
 def test_stopping_pending_authentication_cleans_only_that_transaction() -> None:
