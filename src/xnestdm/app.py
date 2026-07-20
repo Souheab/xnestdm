@@ -233,7 +233,7 @@ class SessionTab(QWidget):
     def toolbar_text(self) -> str:
         if self.account is None or self.selected_session is None:
             return ""
-        return f"{self.account.username} — {self.selected_session.name}"
+        return f"{self.account.username} logged in to: {self.selected_session.name}"
 
     def _authenticate(
         self, username: str, password: str, selected_session: XSession
